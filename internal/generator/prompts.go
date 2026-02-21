@@ -477,19 +477,40 @@ Requirements:
 		count, string(subtype), string(difficulty), stemLines, correctRules, wrongRules)
 }
 
-func BuildRCUserPrompt(difficulty models.Difficulty, questionsPerPassage int) string {
+func BuildRCUserPrompt(difficulty models.Difficulty, questionsPerPassage int, subjectArea string, comparative bool) string {
+	subjectInstruction := ""
+	if subjectArea != "" {
+		subjectInstruction = fmt.Sprintf("\nSubject area: %s (set \"subject_area\" to \"%s\")", subjectArea, subjectArea)
+	}
+
+	comparativeInstruction := ""
+	passageExample := `    "content": "... (450-500 words) ...",
+    "is_comparative": false,
+    "passage_b": null`
+	if comparative {
+		comparativeInstruction = `
+
+COMPARATIVE PASSAGE:
+- Write Passage A (~225 words) in "content" presenting one perspective
+- Write Passage B (~225 words) in "passage_b" presenting a different perspective on the same topic
+- Set "is_comparative" to true
+- Both passages must be self-contained but share enough overlap for comparison questions
+- Include at least one question asking about the relationship between the two passages`
+		passageExample = `    "content": "... (Passage A, ~225 words) ...",
+    "is_comparative": true,
+    "passage_b": "... (Passage B, ~225 words) ..."`
+	}
+
 	return fmt.Sprintf(`Generate a Reading Comprehension passage with %d questions.
 
-Difficulty: %s
+Difficulty: %s%s%s
 
 Respond with this exact JSON structure:
 {
   "passage": {
     "title": "...",
     "subject_area": "law",
-    "content": "... (450-500 words) ...",
-    "is_comparative": false,
-    "passage_b": null
+%s
   },
   "questions": [
     {
@@ -515,7 +536,7 @@ Requirements:
 - Include at least one Main Point question and at least one Inference question
 - For the correct answer choice, set "wrong_answer_type" to null
 - For each wrong answer choice, set "wrong_answer_type" to one of: distortion, too_broad, too_narrow, out_of_scope, reversed_relationship, wrong_paragraph`,
-		questionsPerPassage, string(difficulty))
+		questionsPerPassage, string(difficulty), subjectInstruction, comparativeInstruction, passageExample)
 }
 
 // GetSubtypeStems returns the question stems for a given subtype.

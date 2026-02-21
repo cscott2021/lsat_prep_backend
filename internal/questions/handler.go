@@ -159,7 +159,7 @@ func (h *Handler) SubmitAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.service.SubmitAnswer(userID, id, req.SelectedChoiceID)
+	resp, err := h.service.SubmitAnswer(userID, id, req.SelectedChoiceID, req.TimeSpentSeconds)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, models.ErrorResponse{Error: "Question not found"})
 		return
@@ -395,6 +395,59 @@ func (h *Handler) ImportQuestions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *Handler) RCDrill(w http.ResponseWriter, r *http.Request) {
+	userID, ok := getUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, models.ErrorResponse{Error: "Authentication required"})
+		return
+	}
+
+	var req models.RCDrillRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "Invalid request body"})
+		return
+	}
+
+	// Validate optional RC subtype
+	if req.RCSubtype != nil {
+		if !models.ValidRCSubtypes[models.RCSubtype(*req.RCSubtype)] {
+			writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "invalid RC subtype"})
+			return
+		}
+	}
+
+	if req.Count <= 0 {
+		req.Count = 8
+	}
+
+	resp, err := h.service.GetRCDrill(r.Context(), userID, req)
+	if err != nil {
+		log.Printf("[handler] RCDrill error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to get RC drill"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) GetPassage(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id, err := strconv.ParseInt(vars["id"], 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "Invalid passage ID"})
+		return
+	}
+
+	passage, err := h.service.GetPassage(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, models.ErrorResponse{Error: "Passage not found"})
+		return
+	}
+
+	dp := passage.ToDrillPassage()
+	writeJSON(w, http.StatusOK, dp)
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {

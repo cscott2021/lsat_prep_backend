@@ -70,7 +70,7 @@ func TestBuildLRUserPrompt(t *testing.T) {
 }
 
 func TestBuildRCUserPrompt(t *testing.T) {
-	prompt := BuildRCUserPrompt(models.DifficultyHard, 5)
+	prompt := BuildRCUserPrompt(models.DifficultyHard, 5, "", false)
 
 	required := []string{"5", "hard", "passage", "correct_answer_id", "wrong_answer_type", "subject_area"}
 	for _, keyword := range required {

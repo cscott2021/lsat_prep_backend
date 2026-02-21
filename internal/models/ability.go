@@ -22,11 +22,14 @@ type UserAbilityScore struct {
 }
 
 type UserQuestionHistory struct {
-	ID         int64     `json:"id"`
-	UserID     int64     `json:"user_id"`
-	QuestionID int64     `json:"question_id"`
-	AnsweredAt time.Time `json:"answered_at"`
-	Correct    bool      `json:"correct"`
+	ID               int64     `json:"id"`
+	UserID           int64     `json:"user_id"`
+	QuestionID       int64     `json:"question_id"`
+	AnsweredAt       time.Time `json:"answered_at"`
+	Correct          bool      `json:"correct"`
+	SelectedChoiceID *string   `json:"selected_choice_id,omitempty"`
+	TimeSpentSeconds *float64  `json:"time_spent_seconds,omitempty"`
+	AttemptCount     int       `json:"attempt_count"`
 }
 
 // ── API Request/Response Types ────────────────────────────
@@ -72,6 +75,8 @@ type GenerationQueueItem struct {
 	TargetDifficulty    string     `json:"target_difficulty"`
 	Status              string     `json:"status"`
 	QuestionsNeeded     int        `json:"questions_needed"`
+	SubjectArea         *string    `json:"subject_area,omitempty"`
+	IsComparative       bool       `json:"is_comparative"`
 	ErrorMessage        *string    `json:"error_message,omitempty"`
 	CreatedAt           time.Time  `json:"created_at"`
 	CompletedAt         *time.Time `json:"completed_at,omitempty"`

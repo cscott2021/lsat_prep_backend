@@ -80,9 +80,9 @@ func (g *Generator) GenerateLRBatch(ctx context.Context, subtype models.LRSubtyp
 	return batch, resp, nil
 }
 
-func (g *Generator) GenerateRCBatch(ctx context.Context, difficulty models.Difficulty, questionsPerPassage int) (*GeneratedBatch, *LLMResponse, error) {
+func (g *Generator) GenerateRCBatch(ctx context.Context, difficulty models.Difficulty, questionsPerPassage int, subjectArea string, comparative bool) (*GeneratedBatch, *LLMResponse, error) {
 	systemPrompt := RCSystemPrompt()
-	userPrompt := BuildRCUserPrompt(difficulty, questionsPerPassage)
+	userPrompt := BuildRCUserPrompt(difficulty, questionsPerPassage, subjectArea, comparative)
 
 	resp, err := g.llm.Generate(ctx, systemPrompt, userPrompt)
 	if err != nil {

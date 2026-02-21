@@ -3,7 +3,10 @@ package database
 import (
 	"database/sql"
 	"fmt"
+	"math/rand"
 	"os"
+	"strings"
+	"time"
 
 	_ "github.com/lib/pq"
 )
@@ -42,12 +45,14 @@ func Migrate(db *sql.DB) error {
 		id BIGSERIAL PRIMARY KEY,
 		email VARCHAR(255) UNIQUE NOT NULL,
 		name VARCHAR(255) NOT NULL,
+		username VARCHAR(50) UNIQUE,
 		password VARCHAR(255) NOT NULL,
 		created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
 		updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+	CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 
 	CREATE TABLE IF NOT EXISTS question_batches (
 		id                BIGSERIAL PRIMARY KEY,
@@ -178,6 +183,67 @@ func Migrate(db *sql.DB) error {
 		created_at           TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
 		completed_at         TIMESTAMP WITH TIME ZONE
 	);
+
+	CREATE TABLE IF NOT EXISTS user_gamification (
+		user_id              BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+		total_xp             BIGINT NOT NULL DEFAULT 0,
+		weekly_xp            BIGINT NOT NULL DEFAULT 0,
+		weekly_xp_reset_at   TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+		current_streak       INT NOT NULL DEFAULT 0,
+		longest_streak       INT NOT NULL DEFAULT 0,
+		last_active_date     DATE,
+		streak_freeze_active BOOLEAN NOT NULL DEFAULT FALSE,
+		streak_freezes_owned INT NOT NULL DEFAULT 0,
+		gems                 INT NOT NULL DEFAULT 0,
+		daily_goal_target    INT NOT NULL DEFAULT 6,
+		daily_goal_progress  INT NOT NULL DEFAULT 0,
+		daily_goal_date      DATE DEFAULT CURRENT_DATE,
+		league_tier          VARCHAR(20) NOT NULL DEFAULT 'bronze',
+		questions_answered_total INT NOT NULL DEFAULT 0,
+		questions_correct_total  INT NOT NULL DEFAULT 0,
+		drills_completed_total   INT NOT NULL DEFAULT 0,
+		perfect_drills_total     INT NOT NULL DEFAULT 0,
+		created_at           TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+		updated_at           TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+	);
+
+	CREATE TABLE IF NOT EXISTS xp_events (
+		id          BIGSERIAL PRIMARY KEY,
+		user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		event_type  VARCHAR(50) NOT NULL,
+		xp_amount   INT NOT NULL,
+		metadata    JSONB,
+		created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+	);
+
+	CREATE TABLE IF NOT EXISTS friendships (
+		id          BIGSERIAL PRIMARY KEY,
+		user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		friend_id   BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		status      VARCHAR(20) NOT NULL DEFAULT 'pending',
+		created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+		accepted_at TIMESTAMP WITH TIME ZONE,
+		UNIQUE(user_id, friend_id),
+		CHECK(user_id != friend_id)
+	);
+
+	CREATE TABLE IF NOT EXISTS nudges (
+		id          BIGSERIAL PRIMARY KEY,
+		sender_id   BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		receiver_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		message     VARCHAR(200),
+		nudge_type  VARCHAR(30) NOT NULL DEFAULT 'comeback',
+		read        BOOLEAN NOT NULL DEFAULT FALSE,
+		created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+	);
+
+	CREATE TABLE IF NOT EXISTS achievements (
+		id          BIGSERIAL PRIMARY KEY,
+		user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		achievement VARCHAR(100) NOT NULL,
+		earned_at   TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+		UNIQUE(user_id, achievement)
+	);
 	`
 
 	_, err := db.Exec(query)
@@ -202,6 +268,12 @@ func Migrate(db *sql.DB) error {
 		`ALTER TABLE questions ADD COLUMN IF NOT EXISTS difficulty_score INT CHECK (difficulty_score >= 0 AND difficulty_score <= 100)`,
 		`ALTER TABLE questions ADD COLUMN IF NOT EXISTS rc_subtype VARCHAR(50)`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS difficulty_slider INT NOT NULL DEFAULT 50`,
+		// Username column
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS username VARCHAR(50) UNIQUE`,
+		// RC passage enhancements
+		`ALTER TABLE rc_passages ADD COLUMN IF NOT EXISTS word_count INT`,
+		`ALTER TABLE generation_queue ADD COLUMN IF NOT EXISTS subject_area VARCHAR(50)`,
+		`ALTER TABLE generation_queue ADD COLUMN IF NOT EXISTS is_comparative BOOLEAN DEFAULT FALSE`,
 	}
 
 	for _, stmt := range alterStatements {
@@ -227,6 +299,60 @@ func Migrate(db *sql.DB) error {
 	db.Exec(`DO $$ BEGIN ALTER TABLE questions ALTER COLUMN difficulty_score SET NOT NULL; EXCEPTION WHEN others THEN NULL; END $$`)
 	db.Exec(`ALTER TABLE questions ALTER COLUMN difficulty_score SET DEFAULT 50`)
 
+	// Backfill usernames for existing users that don't have one
+	var usersWithoutUsername int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM users WHERE username IS NULL`).Scan(&usersWithoutUsername); err == nil && usersWithoutUsername > 0 {
+		// Generate random usernames from lowercase name + random digits
+		rows, err := db.Query(`SELECT id, name FROM users WHERE username IS NULL`)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var id int64
+				var name string
+				if rows.Scan(&id, &name) == nil {
+					base := generateUsernameBase(name)
+					// Try up to 10 times with different random suffixes
+					for attempt := 0; attempt < 10; attempt++ {
+						candidate := fmt.Sprintf("%s%04d", base, randomInt(10000))
+						_, err := db.Exec(
+							`UPDATE users SET username = $1 WHERE id = $2 AND username IS NULL`,
+							candidate, id,
+						)
+						if err == nil {
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Set NOT NULL on username (safe after backfill)
+	db.Exec(`DO $$ BEGIN ALTER TABLE users ALTER COLUMN username SET NOT NULL; EXCEPTION WHEN others THEN NULL; END $$`)
+
+	// Backfill word_count on existing RC passages
+	db.Exec(`UPDATE rc_passages SET word_count = array_length(regexp_split_to_array(trim(content), '\s+'), 1) WHERE word_count IS NULL`)
+
+	// Extend user_question_history with richer tracking columns
+	historyAlters := []string{
+		`ALTER TABLE user_question_history ADD COLUMN IF NOT EXISTS selected_choice_id VARCHAR(5)`,
+		`ALTER TABLE user_question_history ADD COLUMN IF NOT EXISTS time_spent_seconds REAL`,
+		`ALTER TABLE user_question_history ADD COLUMN IF NOT EXISTS attempt_count INT NOT NULL DEFAULT 1`,
+	}
+	for _, stmt := range historyAlters {
+		db.Exec(stmt)
+	}
+
+	// Bookmarks table
+	db.Exec(`CREATE TABLE IF NOT EXISTS user_bookmarks (
+		id          BIGSERIAL PRIMARY KEY,
+		user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		question_id BIGINT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+		note        TEXT,
+		created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+		UNIQUE(user_id, question_id)
+	)`)
+
 	// Create indexes on new columns (must run after ALTER TABLE)
 	newIndexes := []string{
 		`CREATE INDEX IF NOT EXISTS idx_questions_validation ON questions(validation_status)`,
@@ -240,6 +366,20 @@ func Migrate(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_history_user_question ON user_question_history(user_id, question_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_genqueue_status ON generation_queue(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_genqueue_lookup ON generation_queue(section, lr_subtype, status)`,
+		// RC passage indexes
+		`CREATE INDEX IF NOT EXISTS idx_questions_passage ON questions(passage_id) WHERE passage_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_passages_subject ON rc_passages(subject_area)`,
+		`CREATE INDEX IF NOT EXISTS idx_passages_comparative ON rc_passages(is_comparative)`,
+		// Gamification indexes
+		`CREATE INDEX IF NOT EXISTS idx_xp_events_user ON xp_events(user_id, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_friends_user ON friendships(user_id, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_friends_friend ON friendships(friend_id, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_nudges_receiver ON nudges(receiver_id, read, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_achievements_user ON achievements(user_id)`,
+		// History & bookmark indexes
+		`CREATE INDEX IF NOT EXISTS idx_history_user_correct ON user_question_history(user_id, correct)`,
+		`CREATE INDEX IF NOT EXISTS idx_history_user_date ON user_question_history(user_id, answered_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_bookmarks_user ON user_bookmarks(user_id, created_at DESC)`,
 	}
 	for _, stmt := range newIndexes {
 		if _, err := db.Exec(stmt); err != nil {
@@ -255,4 +395,36 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// generateUsernameBase creates a lowercase alphanumeric base from a user's name.
+func generateUsernameBase(name string) string {
+	var result []byte
+	for _, c := range strings.ToLower(name) {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			result = append(result, byte(c))
+		}
+	}
+	if len(result) == 0 {
+		return "user"
+	}
+	if len(result) > 12 {
+		result = result[:12]
+	}
+	return string(result)
+}
+
+// rng is a seeded random source for username generation.
+var rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+
+// randomInt returns a random integer in [0, max).
+func randomInt(max int) int {
+	return rng.Intn(max)
+}
+
+// GenerateUsername creates a unique username from a name by appending random digits.
+// It tries up to 10 times to find a unique one. Caller should handle the unique constraint.
+func GenerateUsername(name string) string {
+	base := generateUsernameBase(name)
+	return fmt.Sprintf("%s%04d", base, randomInt(10000))
 }

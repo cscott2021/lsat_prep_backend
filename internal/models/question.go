@@ -165,7 +165,20 @@ type RCPassage struct {
 	Content       string    `json:"content"`
 	IsComparative bool      `json:"is_comparative"`
 	PassageB      string    `json:"passage_b,omitempty"`
+	WordCount     int       `json:"word_count"`
 	CreatedAt     time.Time `json:"created_at"`
+}
+
+func (p *RCPassage) ToDrillPassage() DrillPassage {
+	return DrillPassage{
+		ID:            p.ID,
+		Title:         p.Title,
+		SubjectArea:   p.SubjectArea,
+		Content:       p.Content,
+		IsComparative: p.IsComparative,
+		PassageB:      p.PassageB,
+		WordCount:     p.WordCount,
+	}
 }
 
 type ValidationLog struct {
@@ -188,15 +201,33 @@ type ValidationLog struct {
 // ── Request Types ─────────────────────────────────────
 
 type GenerateBatchRequest struct {
-	Section    Section    `json:"section"`
-	LRSubtype  *LRSubtype `json:"lr_subtype,omitempty"`
-	RCSubtype  *RCSubtype `json:"rc_subtype,omitempty"`
-	Difficulty Difficulty `json:"difficulty"`
-	Count      int        `json:"count"`
+	Section       Section    `json:"section"`
+	LRSubtype     *LRSubtype `json:"lr_subtype,omitempty"`
+	RCSubtype     *RCSubtype `json:"rc_subtype,omitempty"`
+	Difficulty    Difficulty `json:"difficulty"`
+	Count         int        `json:"count"`
+	SubjectArea   string     `json:"subject_area,omitempty"`
+	IsComparative bool       `json:"is_comparative,omitempty"`
 }
 
 type SubmitAnswerRequest struct {
-	SelectedChoiceID string `json:"selected_choice_id"`
+	SelectedChoiceID string   `json:"selected_choice_id"`
+	TimeSpentSeconds *float64 `json:"time_spent_seconds,omitempty"`
+}
+
+type RCDrillRequest struct {
+	DifficultySlider int     `json:"difficulty_slider"`
+	RCSubtype        *string `json:"rc_subtype,omitempty"`
+	Comparative      *bool   `json:"comparative,omitempty"`
+	Count            int     `json:"count"`
+}
+
+type RCDrillResponse struct {
+	Passage   DrillPassage    `json:"passage"`
+	Questions []DrillQuestion `json:"questions"`
+	Total     int             `json:"total"`
+	Page      int             `json:"page"`
+	PageSize  int             `json:"page_size"`
 }
 
 // ── Response Types ────────────────────────────────────
@@ -216,6 +247,7 @@ type SubmitAnswerResponse struct {
 	Explanation     string            `json:"explanation"`
 	Choices         []AnswerChoice    `json:"choices"`
 	AbilityUpdated  *AbilitySnapshot  `json:"ability_updated,omitempty"`
+	XPAwarded       int               `json:"xp_awarded"`
 }
 
 type QuestionListResponse struct {
@@ -237,6 +269,17 @@ type DrillQuestion struct {
 	Stimulus        string        `json:"stimulus"`
 	QuestionStem    string        `json:"question_stem"`
 	Choices         []DrillChoice `json:"choices"`
+	Passage         *DrillPassage `json:"passage,omitempty"`
+}
+
+type DrillPassage struct {
+	ID            int64  `json:"id"`
+	Title         string `json:"title"`
+	SubjectArea   string `json:"subject_area"`
+	Content       string `json:"content"`
+	IsComparative bool   `json:"is_comparative"`
+	PassageB      string `json:"passage_b,omitempty"`
+	WordCount     int    `json:"word_count"`
 }
 
 type DrillChoice struct {

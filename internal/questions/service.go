@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lsat-prep/backend/internal/gamification"
 	"github.com/lsat-prep/backend/internal/generator"
 	"github.com/lsat-prep/backend/internal/models"
 )
@@ -36,6 +37,12 @@ type Service struct {
 	autoGenEnabledLR   bool
 	autoGenEnabledRC   bool
 	autoGenMinUnseen   int
+	gamService         *gamification.Service
+}
+
+// SetGamificationService injects the gamification service for XP/streak/goal tracking.
+func (s *Service) SetGamificationService(gs *gamification.Service) {
+	s.gamService = gs
 }
 
 func NewService(store *Store, gen *generator.Generator, val *generator.Validator) *Service {
@@ -107,7 +114,7 @@ func (s *Service) GenerateBatch(ctx context.Context, req models.GenerateBatchReq
 		}
 		genBatch, llmResp, err = s.generator.GenerateLRBatch(ctx, *req.LRSubtype, req.Difficulty, req.Count)
 	case models.SectionRC:
-		genBatch, llmResp, err = s.generator.GenerateRCBatch(ctx, req.Difficulty, req.Count)
+		genBatch, llmResp, err = s.generator.GenerateRCBatch(ctx, req.Difficulty, req.Count, req.SubjectArea, req.IsComparative)
 	default:
 		s.store.FailBatch(batch.ID, "invalid section")
 		return nil, fmt.Errorf("invalid section: %s", req.Section)
@@ -350,9 +357,13 @@ func (s *Service) GetDrillQuestions(section models.Section, subtype *models.LRSu
 	return s.store.GetDrillQuestions(section, subtype, difficulty, count)
 }
 
+func (s *Service) GetPassage(passageID int64) (*models.RCPassage, error) {
+	return s.store.GetPassage(passageID)
+}
+
 // ── Answer Submission + Ability Updates ──────────────────
 
-func (s *Service) SubmitAnswer(userID int64, questionID int64, selectedChoiceID string) (*models.SubmitAnswerResponse, error) {
+func (s *Service) SubmitAnswer(userID int64, questionID int64, selectedChoiceID string, timeSpentSeconds *float64) (*models.SubmitAnswerResponse, error) {
 	question, err := s.store.GetQuestionWithChoices(questionID)
 	if err != nil {
 		return nil, err
@@ -366,8 +377,8 @@ func (s *Service) SubmitAnswer(userID int64, questionID int64, selectedChoiceID 
 		s.store.IncrementCorrect(questionID)
 	}
 
-	// Record user history
-	if err := s.store.RecordAnswer(userID, questionID, isCorrect); err != nil {
+	// Record user history (with selected answer and time)
+	if err := s.store.RecordAnswer(userID, questionID, isCorrect, &selectedChoiceID, timeSpentSeconds); err != nil {
 		log.Printf("WARN: failed to record answer history: %v", err)
 	}
 
@@ -378,6 +389,17 @@ func (s *Service) SubmitAnswer(userID int64, questionID int64, selectedChoiceID 
 		log.Printf("WARN: failed to update ability scores: %v", err)
 	} else {
 		abilitySnapshot = snapshot
+	}
+
+	// Gamification: award XP, update daily goal, streak, counters
+	var xpAwarded int
+	if s.gamService != nil {
+		if isCorrect && abilitySnapshot != nil {
+			xpAwarded = s.gamService.AwardQuestionXP(userID, question.DifficultyScore, abilitySnapshot.SubtypeAbility)
+		}
+		s.gamService.UpdateDailyGoal(userID, 1)
+		s.gamService.UpdateStreak(userID)
+		s.gamService.IncrementCounters(userID, isCorrect)
 	}
 
 	// Async check generation queue for this question's difficulty range
@@ -400,6 +422,7 @@ func (s *Service) SubmitAnswer(userID int64, questionID int64, selectedChoiceID 
 		Explanation:     question.Explanation,
 		Choices:         question.Choices,
 		AbilityUpdated:  abilitySnapshot,
+		XPAwarded:       xpAwarded,
 	}, nil
 }
 
@@ -459,6 +482,27 @@ func (s *Service) GetQuickDrill(ctx context.Context, userID int64, req models.Qu
 		req.Count = 6
 	}
 
+	// RC section: delegate to passage-based RC drill flow
+	if req.Section == "reading_comprehension" {
+		rcReq := models.RCDrillRequest{
+			DifficultySlider: req.DifficultySlider,
+			Count:            req.Count,
+		}
+		resp, err := s.GetRCDrill(ctx, userID, rcReq)
+		if err != nil {
+			return nil, err
+		}
+		if resp == nil {
+			return []models.DrillQuestion{}, nil
+		}
+		// Convert RCDrillResponse questions (which include passage) to DrillQuestion slice
+		var questions []models.DrillQuestion
+		for _, q := range resp.Questions {
+			questions = append(questions, q)
+		}
+		return questions, nil
+	}
+
 	// Get user's section ability
 	section := req.Section
 	if section == "both" {
@@ -489,7 +533,7 @@ func (s *Service) GetQuickDrill(ctx context.Context, userID int64, req models.Qu
 	if req.Section == "logical_reasoning" || req.Section == "both" {
 		subtypes = append(subtypes, allLRSubtypes...)
 	}
-	if req.Section == "reading_comprehension" || req.Section == "both" {
+	if req.Section == "both" {
 		subtypes = append(subtypes, allRCSubtypes...)
 	}
 
@@ -501,22 +545,45 @@ func (s *Service) GetQuickDrill(ctx context.Context, userID int64, req models.Qu
 
 	// For each selected subtype, fetch 1 question in the difficulty window.
 	// Track which subtypes are missing so we can generate for them.
+	// For RC subtypes, reuse the same passage to avoid passage fragmentation.
 	var questions []models.DrillQuestion
 	var missingSubtypes []string
+	var rcPassageID int64
+
 	for _, st := range subtypes {
 		querySection := "logical_reasoning"
 		if strings.HasPrefix(st, "rc_") {
 			querySection = "reading_comprehension"
 		}
-		q, err := s.store.GetOneAdaptiveQuestion(userID, querySection, st, minDiff, maxDiff)
-		if err != nil || q == nil {
-			// Try wider window before marking missing
-			q, err = s.store.GetOneAdaptiveQuestion(userID, querySection, st, max(0, target-35), min(100, target+35))
+
+		var q *models.DrillQuestion
+		var err error
+
+		// For RC subtypes with a known passage, try same-passage first
+		if strings.HasPrefix(st, "rc_") && rcPassageID > 0 {
+			q, err = s.store.GetOneAdaptiveQuestionFromPassage(userID, st, rcPassageID, minDiff, maxDiff)
 			if err != nil || q == nil {
-				missingSubtypes = append(missingSubtypes, st)
-				continue
+				q, err = s.store.GetOneAdaptiveQuestionFromPassage(userID, st, rcPassageID, max(0, target-35), min(100, target+35))
 			}
 		}
+
+		// Fall back to any passage
+		if q == nil {
+			q, err = s.store.GetOneAdaptiveQuestion(userID, querySection, st, minDiff, maxDiff)
+			if err != nil || q == nil {
+				q, err = s.store.GetOneAdaptiveQuestion(userID, querySection, st, max(0, target-35), min(100, target+35))
+				if err != nil || q == nil {
+					missingSubtypes = append(missingSubtypes, st)
+					continue
+				}
+			}
+		}
+
+		// Track the first RC passage found for deduplication
+		if strings.HasPrefix(st, "rc_") && q.Passage != nil && rcPassageID == 0 {
+			rcPassageID = q.Passage.ID
+		}
+
 		questions = append(questions, *q)
 	}
 
@@ -647,6 +714,170 @@ func (s *Service) GetSubtypeDrill(ctx context.Context, userID int64, req models.
 	go s.CheckAndQueueGeneration(req.Section, &subtype, minDiff, maxDiff)
 
 	return questions, nil
+}
+
+// ── RC Drill Serving ────────────────────────────────────
+
+func (s *Service) GetRCDrill(ctx context.Context, userID int64, req models.RCDrillRequest) (*models.RCDrillResponse, error) {
+	if req.Count <= 0 {
+		req.Count = 8
+	}
+
+	// Get user's RC section ability
+	section := "reading_comprehension"
+	sectionAbility, err := s.store.GetOrCreateAbility(userID, models.ScopeSection, &section)
+	if err != nil {
+		sectionAbility = &models.UserAbilityScore{AbilityScore: 50}
+	}
+
+	slider := req.DifficultySlider
+	if slider == 0 {
+		saved, err := s.store.GetDifficultySlider(userID)
+		if err == nil && saved > 0 {
+			slider = saved
+		} else {
+			slider = 50
+		}
+	}
+
+	target := TargetDifficulty(sectionAbility.AbilityScore, slider)
+	minDiff := max(0, target-15)
+	maxDiff := min(100, target+15)
+
+	// Try narrow window
+	passage, questions, err := s.store.GetRCPassageWithQuestions(
+		userID, minDiff, maxDiff, req.RCSubtype, req.Comparative, req.Count,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("rc drill: %w", err)
+	}
+
+	// Widen window if no passage found
+	if passage == nil {
+		minDiff = max(0, target-35)
+		maxDiff = min(100, target+35)
+		passage, questions, err = s.store.GetRCPassageWithQuestions(
+			userID, minDiff, maxDiff, req.RCSubtype, req.Comparative, req.Count,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("rc drill (wide): %w", err)
+		}
+	}
+
+	// Synchronous generation fallback
+	if passage == nil {
+		difficulty := mapScoreToDifficulty(target)
+		genReq := models.GenerateBatchRequest{
+			Section:    models.SectionRC,
+			Difficulty: difficulty,
+			Count:      6,
+		}
+
+		log.Printf("[rc-drill] No passage found, generating synchronously")
+		_, genErr := s.GenerateBatch(ctx, genReq)
+		if genErr != nil {
+			log.Printf("WARN: RC synchronous generation failed: %v", genErr)
+		} else {
+			// Retry after generation
+			passage, questions, err = s.store.GetRCPassageWithQuestions(
+				userID, 0, 100, req.RCSubtype, req.Comparative, req.Count,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("rc drill (post-gen): %w", err)
+			}
+		}
+	}
+
+	if passage == nil {
+		return nil, fmt.Errorf("no RC passages available")
+	}
+
+	// Convert to drill questions (strip answer data)
+	drillPassage := passage.ToDrillPassage()
+	drillQuestions := make([]models.DrillQuestion, 0, len(questions))
+	for _, q := range questions {
+		dq := models.DrillQuestion{
+			ID:              q.ID,
+			Section:         q.Section,
+			LRSubtype:       q.LRSubtype,
+			RCSubtype:       q.RCSubtype,
+			Difficulty:      q.Difficulty,
+			DifficultyScore: q.DifficultyScore,
+			Stimulus:        q.Stimulus,
+			QuestionStem:    q.QuestionStem,
+			Passage:         &drillPassage,
+		}
+		for _, c := range q.Choices {
+			dq.Choices = append(dq.Choices, models.DrillChoice{
+				ChoiceID:   c.ChoiceID,
+				ChoiceText: c.ChoiceText,
+			})
+		}
+		drillQuestions = append(drillQuestions, dq)
+	}
+
+	// Async check RC inventory
+	go s.CheckRCInventory(minDiff, maxDiff, req.RCSubtype)
+
+	return &models.RCDrillResponse{
+		Passage:   drillPassage,
+		Questions: drillQuestions,
+		Total:     len(drillQuestions),
+		Page:      1,
+		PageSize:  req.Count,
+	}, nil
+}
+
+var rcSubjectAreas = []string{"law", "natural_science", "social_science", "humanities"}
+
+func (s *Service) NextRCSubjectArea() string {
+	last := s.store.GetLastRCSubjectArea()
+	if last == "" {
+		return rcSubjectAreas[0]
+	}
+	for i, sa := range rcSubjectAreas {
+		if sa == last {
+			return rcSubjectAreas[(i+1)%len(rcSubjectAreas)]
+		}
+	}
+	return rcSubjectAreas[0]
+}
+
+func (s *Service) ShouldGenerateComparative() bool {
+	comparative, total := s.store.GetComparativeRatio()
+	if total < 4 {
+		return false
+	}
+	return float64(comparative)/float64(total) < 0.25
+}
+
+func (s *Service) CheckRCInventory(minDiff, maxDiff int, rcSubtype *string) {
+	if !s.autoGenEnabledRC {
+		return
+	}
+
+	type bucket struct {
+		min, max   int
+		difficulty string
+	}
+	buckets := []bucket{
+		{0, 20, "easy"}, {21, 40, "easy"}, {41, 60, "medium"},
+		{61, 80, "hard"}, {81, 100, "hard"},
+	}
+
+	for _, b := range buckets {
+		if b.max < minDiff || b.min > maxDiff {
+			continue
+		}
+		count := s.store.CountRCPassagesInBucket(b.min, b.max)
+		if count < 3 {
+			subjectArea := s.NextRCSubjectArea()
+			isComparative := s.ShouldGenerateComparative()
+			s.store.UpsertRCGenerationQueue(b.min, b.max, b.difficulty, subjectArea, isComparative)
+			log.Printf("[rc-inventory] Queued RC generation: bucket=%d-%d subject=%s comparative=%v",
+				b.min, b.max, subjectArea, isComparative)
+		}
+	}
 }
 
 func mapScoreToDifficulty(score int) models.Difficulty {
@@ -794,6 +1025,10 @@ func (s *Service) processGenerationQueue(ctx context.Context) {
 			sub := models.RCSubtype(*item.RCSubtype)
 			genReq.RCSubtype = &sub
 		}
+		if item.SubjectArea != nil {
+			genReq.SubjectArea = *item.SubjectArea
+		}
+		genReq.IsComparative = item.IsComparative
 
 		_, err := s.GenerateBatch(ctx, genReq)
 		if err != nil {
@@ -1019,4 +1254,103 @@ func validateExportQuestion(q models.ExportQuestion) error {
 		}
 	}
 	return nil
+}
+
+// ── History & Bookmarks ───────────────────────────────────
+
+func (s *Service) GetUserHistory(userID int64, req models.HistoryListRequest) (*models.HistoryListResponse, error) {
+	if req.Page <= 0 {
+		req.Page = 1
+	}
+	if req.PageSize <= 0 {
+		req.PageSize = 20
+	}
+	if req.PageSize > 50 {
+		req.PageSize = 50
+	}
+	if req.SortBy == "" {
+		req.SortBy = "answered_at"
+	}
+	if req.SortOrder == "" {
+		req.SortOrder = "desc"
+	}
+
+	questions, total, err := s.store.GetUserHistory(userID, req)
+	if err != nil {
+		return nil, err
+	}
+	if questions == nil {
+		questions = []models.HistoryQuestion{}
+	}
+	return &models.HistoryListResponse{
+		Questions: questions,
+		Total:     total,
+		Page:      req.Page,
+		PageSize:  req.PageSize,
+	}, nil
+}
+
+func (s *Service) GetUserMistakes(userID int64, page, pageSize int) (*models.HistoryListResponse, error) {
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	if pageSize > 50 {
+		pageSize = 50
+	}
+
+	questions, total, err := s.store.GetUserMistakes(userID, page, pageSize)
+	if err != nil {
+		return nil, err
+	}
+	if questions == nil {
+		questions = []models.HistoryQuestion{}
+	}
+	return &models.HistoryListResponse{
+		Questions: questions,
+		Total:     total,
+		Page:      page,
+		PageSize:  pageSize,
+	}, nil
+}
+
+func (s *Service) GetUserHistoryStats(userID int64) (*models.HistoryStatsResponse, error) {
+	return s.store.GetUserHistoryStats(userID)
+}
+
+func (s *Service) GetDrillReview(userID int64, questionIDs []int64) ([]models.HistoryQuestion, error) {
+	return s.store.GetDrillReview(userID, questionIDs)
+}
+
+func (s *Service) CreateBookmark(userID, questionID int64, note *string) error {
+	return s.store.CreateBookmark(userID, questionID, note)
+}
+
+func (s *Service) DeleteBookmark(userID, questionID int64) error {
+	return s.store.DeleteBookmark(userID, questionID)
+}
+
+func (s *Service) GetBookmarks(userID int64, page, pageSize int) (*models.BookmarkListResponse, error) {
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	if pageSize > 50 {
+		pageSize = 50
+	}
+
+	bookmarks, total, err := s.store.GetBookmarks(userID, page, pageSize)
+	if err != nil {
+		return nil, err
+	}
+	return &models.BookmarkListResponse{
+		Bookmarks: bookmarks,
+		Total:     total,
+		Page:      page,
+		PageSize:  pageSize,
+	}, nil
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/lsat-prep/backend/internal/database"
 	"github.com/lsat-prep/backend/internal/models"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -50,13 +51,31 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Generate a unique username
+	username := database.GenerateUsername(req.Name)
+
 	var user models.User
-	err = h.db.QueryRow(
-		`INSERT INTO users (email, name, password, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5)
-		 RETURNING id, email, name, created_at, updated_at`,
-		req.Email, req.Name, string(hashedPassword), time.Now(), time.Now(),
-	).Scan(&user.ID, &user.Email, &user.Name, &user.CreatedAt, &user.UpdatedAt)
+	// Try up to 5 times in case of username collision
+	var insertErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		insertErr = h.db.QueryRow(
+			`INSERT INTO users (email, name, username, password, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6)
+			 RETURNING id, email, name, username, created_at, updated_at`,
+			req.Email, req.Name, username, string(hashedPassword), time.Now(), time.Now(),
+		).Scan(&user.ID, &user.Email, &user.Name, &user.Username, &user.CreatedAt, &user.UpdatedAt)
+
+		if insertErr == nil {
+			break
+		}
+		if strings.Contains(insertErr.Error(), "users_username_key") {
+			// Username collision — regenerate and retry
+			username = database.GenerateUsername(req.Name)
+			continue
+		}
+		break // Other error, stop retrying
+	}
+	err = insertErr
 
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate key") {
@@ -93,9 +112,9 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	var user models.User
 	var hashedPassword string
 	err := h.db.QueryRow(
-		`SELECT id, email, name, password, created_at, updated_at FROM users WHERE email = $1`,
+		`SELECT id, email, name, COALESCE(username, ''), password, created_at, updated_at FROM users WHERE email = $1`,
 		req.Email,
-	).Scan(&user.ID, &user.Email, &user.Name, &hashedPassword, &user.CreatedAt, &user.UpdatedAt)
+	).Scan(&user.ID, &user.Email, &user.Name, &user.Username, &hashedPassword, &user.CreatedAt, &user.UpdatedAt)
 
 	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusUnauthorized, models.ErrorResponse{Error: "Invalid email or password"})
@@ -125,9 +144,9 @@ func (h *Handler) GetCurrentUser(w http.ResponseWriter, r *http.Request) {
 
 	var user models.User
 	err := h.db.QueryRow(
-		`SELECT id, email, name, created_at, updated_at FROM users WHERE id = $1`,
+		`SELECT id, email, name, COALESCE(username, ''), created_at, updated_at FROM users WHERE id = $1`,
 		userID,
-	).Scan(&user.ID, &user.Email, &user.Name, &user.CreatedAt, &user.UpdatedAt)
+	).Scan(&user.ID, &user.Email, &user.Name, &user.Username, &user.CreatedAt, &user.UpdatedAt)
 
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, models.ErrorResponse{Error: "User not found"})

@@ -213,7 +213,7 @@ func (v *Validator) AdversarialCheckBatch(ctx context.Context, batch *GeneratedB
 	results := make([]AdversarialResult, 0, len(batch.Questions))
 
 	for i, q := range batch.Questions {
-		ar, err := v.AdversarialCheckQuestion(ctx, q)
+		ar, err := v.AdversarialCheckQuestion(ctx, q, batch.Passage)
 		if err != nil {
 			log.Printf("WARN: adversarial check failed for question %d: %v — passing as clean", i+1, err)
 			ar = &AdversarialResult{
@@ -229,8 +229,8 @@ func (v *Validator) AdversarialCheckBatch(ctx context.Context, batch *GeneratedB
 	return results, nil
 }
 
-func (v *Validator) AdversarialCheckQuestion(ctx context.Context, q GeneratedQuestion) (*AdversarialResult, error) {
-	prompt := buildAdversarialPrompt(q)
+func (v *Validator) AdversarialCheckQuestion(ctx context.Context, q GeneratedQuestion, passage *GeneratedPassage) (*AdversarialResult, error) {
+	prompt := buildAdversarialPrompt(q, passage)
 
 	resp, err := v.llm.Generate(ctx, adversarialSystemPrompt, prompt)
 	if err != nil {
@@ -254,12 +254,26 @@ func (v *Validator) AdversarialCheckQuestion(ctx context.Context, q GeneratedQue
 
 const adversarialSystemPrompt = `You are reviewing an LSAT question for quality. Your job is to try to argue for every incorrect answer choice. If you can make a compelling argument for any wrong answer, the question is ambiguous and should be flagged. Respond with JSON only.`
 
-func buildAdversarialPrompt(q GeneratedQuestion) string {
+func buildAdversarialPrompt(q GeneratedQuestion, passage *GeneratedPassage) string {
 	var sb strings.Builder
 
-	sb.WriteString("STIMULUS:\n")
-	sb.WriteString(q.Stimulus)
-	sb.WriteString("\n\nQUESTION:\n")
+	if passage != nil {
+		sb.WriteString("PASSAGE:\n")
+		sb.WriteString(passage.Content)
+		if passage.IsComparative && passage.PassageB != "" {
+			sb.WriteString("\n\nPASSAGE B:\n")
+			sb.WriteString(passage.PassageB)
+		}
+		sb.WriteString("\n\n")
+	}
+
+	if q.Stimulus != "" {
+		sb.WriteString("STIMULUS:\n")
+		sb.WriteString(q.Stimulus)
+		sb.WriteString("\n\n")
+	}
+
+	sb.WriteString("QUESTION:\n")
 	sb.WriteString(q.QuestionStem)
 	sb.WriteString("\n\n")
 
