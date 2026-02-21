@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lsat_user
+      POSTGRES_PASSWORD: lsat_password
+      POSTGRES_DB: lsat_prep
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lsat_user -d lsat_prep"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: lsat_user
+      DB_PASSWORD: lsat_password
+      DB_NAME: lsat_prep
+      JWT_SECRET: change-this-to-a-real-secret
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
