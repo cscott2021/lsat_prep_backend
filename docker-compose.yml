@@ -26,7 +26,22 @@ services:
       DB_USER: lsat_user
       DB_PASSWORD: lsat_password
       DB_NAME: lsat_prep
-      JWT_SECRET: change-this-to-a-real-secret
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_MODEL: claude-opus-4-5-20251101
+      ANTHROPIC_VALIDATION_MODEL: claude-sonnet-4-5-20250929
+      MOCK_GENERATOR: ${MOCK_GENERATOR:-false}
+      USE_CLI_GENERATOR: ${USE_CLI_GENERATOR:-false}
+      CLAUDE_CLI_PATH: ${CLAUDE_CLI_PATH:-claude}
+      VALIDATION_ENABLED: ${VALIDATION_ENABLED:-true}
+      ADVERSARIAL_ENABLED: ${ADVERSARIAL_ENABLED:-true}
+      MAX_VALIDATION_RETRIES: "1"
+      MAX_DAILY_GENERATION_COST: "10.00"
+      QUESTION_BATCH_SIZE: "6"
+      DIFFICULTY_WINDOW_SIZE: "15"
+      DIFFICULTY_WINDOW_MAX: "35"
+      MIN_BUCKET_INVENTORY: "6"
+      GENERATION_QUEUE_INTERVAL: "30"
+      GENERATION_QUEUE_BATCH_SIZE: "5"
     depends_on:
       db:
         condition: service_healthy

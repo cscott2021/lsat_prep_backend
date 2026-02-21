@@ -1,0 +1,61 @@
+{
+  "family": "lsat-prep-backend",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::835253518597:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "lsat-backend",
+      "image": "835253518597.dkr.ecr.us-east-1.amazonaws.com/lsat-prep-backend:latest",
+      "portMappings": [
+        {
+          "containerPort": 8080,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        { "name": "PORT", "value": "8080" },
+        { "name": "DB_PORT", "value": "5432" },
+        { "name": "DB_USER", "value": "lsat_user" },
+        { "name": "DB_NAME", "value": "lsat_prep" },
+        { "name": "DB_SSLMODE", "value": "require" },
+        { "name": "ANTHROPIC_MODEL", "value": "claude-opus-4-5-20251101" },
+        { "name": "ANTHROPIC_VALIDATION_MODEL", "value": "claude-sonnet-4-5-20250929" },
+        { "name": "VALIDATION_ENABLED", "value": "true" },
+        { "name": "ADVERSARIAL_ENABLED", "value": "true" },
+        { "name": "MAX_VALIDATION_RETRIES", "value": "1" },
+        { "name": "MAX_DAILY_GENERATION_COST", "value": "10.00" },
+        { "name": "QUESTION_BATCH_SIZE", "value": "6" },
+        { "name": "DIFFICULTY_WINDOW_SIZE", "value": "15" },
+        { "name": "DIFFICULTY_WINDOW_MAX", "value": "35" },
+        { "name": "MIN_BUCKET_INVENTORY", "value": "6" },
+        { "name": "GENERATION_QUEUE_INTERVAL", "value": "30" },
+        { "name": "GENERATION_QUEUE_BATCH_SIZE", "value": "5" }
+      ],
+      "secrets": [
+        {
+          "name": "DB_HOST",
+          "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/staging/DB_HOST"
+        },
+        {
+          "name": "DB_PASSWORD",
+          "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/staging/DB_PASSWORD"
+        },
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/staging/ANTHROPIC_API_KEY"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/lsat-prep-backend",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}

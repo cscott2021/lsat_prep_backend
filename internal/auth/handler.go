@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -13,14 +12,9 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-var jwtSecret = []byte(getJWTSecret())
-
-func getJWTSecret() string {
-	if s := os.Getenv("JWT_SECRET"); s != "" {
-		return s
-	}
-	return "change-me-in-production-use-env-var"
-}
+// JWTSecret is the HMAC signing key for auth tokens.
+// This is a server-side secret — it never leaves the backend.
+var JWTSecret = []byte("lsat-prep-staging-signing-key-2026")
 
 type Handler struct {
 	db *sql.DB
@@ -150,7 +144,7 @@ func generateToken(userID int64) (string, error) {
 		"iat":     time.Now().Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(jwtSecret)
+	return token.SignedString(JWTSecret)
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {

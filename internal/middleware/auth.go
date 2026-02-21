@@ -3,19 +3,11 @@ package middleware
 import (
 	"context"
 	"net/http"
-	"os"
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/lsat-prep/backend/internal/auth"
 )
-
-func getJWTSecret() []byte {
-	secret := os.Getenv("JWT_SECRET")
-	if secret == "" {
-		secret = "change-me-in-production-use-env-var"
-	}
-	return []byte(secret)
-}
 
 func AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -35,7 +27,7 @@ func AuthMiddleware(next http.Handler) http.Handler {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, jwt.ErrSignatureInvalid
 			}
-			return getJWTSecret(), nil
+			return auth.JWTSecret, nil
 		})
 
 		if err != nil || !token.Valid {
