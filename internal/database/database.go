@@ -52,7 +52,6 @@ func Migrate(db *sql.DB) error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
-	CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 
 	CREATE TABLE IF NOT EXISTS question_batches (
 		id                BIGSERIAL PRIMARY KEY,
@@ -370,6 +369,8 @@ func Migrate(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_questions_passage ON questions(passage_id) WHERE passage_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_passages_subject ON rc_passages(subject_area)`,
 		`CREATE INDEX IF NOT EXISTS idx_passages_comparative ON rc_passages(is_comparative)`,
+		// Username index (must be after ALTER TABLE adds the column)
+		`CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)`,
 		// Gamification indexes
 		`CREATE INDEX IF NOT EXISTS idx_xp_events_user ON xp_events(user_id, created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_friends_user ON friendships(user_id, status)`,
