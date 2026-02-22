@@ -537,92 +537,64 @@ func (s *Service) GetQuickDrill(ctx context.Context, userID int64, req models.Qu
 		subtypes = append(subtypes, allRCSubtypes...)
 	}
 
-	// Shuffle and pick first N
+	// Shuffle subtypes for variety
 	rand.Shuffle(len(subtypes), func(i, j int) { subtypes[i], subtypes[j] = subtypes[j], subtypes[i] })
-	if len(subtypes) > req.Count {
-		subtypes = subtypes[:req.Count]
-	}
 
-	// For each selected subtype, fetch 1 question in the difficulty window.
-	// Track which subtypes are missing so we can generate for them.
-	// For RC subtypes, reuse the same passage to avoid passage fragmentation.
+	// For each subtype, try to fetch 1 unseen question in the difficulty window.
+	// Stop once we have enough questions.
 	var questions []models.DrillQuestion
-	var missingSubtypes []string
-	var rcPassageID int64
+	seenQuestionIDs := make(map[int64]bool)
 
 	for _, st := range subtypes {
+		if len(questions) >= req.Count {
+			break
+		}
+
 		querySection := "logical_reasoning"
 		if strings.HasPrefix(st, "rc_") {
 			querySection = "reading_comprehension"
 		}
 
-		var q *models.DrillQuestion
-		var err error
-
-		// For RC subtypes with a known passage, try same-passage first
-		if strings.HasPrefix(st, "rc_") && rcPassageID > 0 {
-			q, err = s.store.GetOneAdaptiveQuestionFromPassage(userID, st, rcPassageID, minDiff, maxDiff)
+		q, err := s.store.GetOneAdaptiveQuestion(userID, querySection, st, minDiff, maxDiff)
+		if err != nil || q == nil {
+			q, err = s.store.GetOneAdaptiveQuestion(userID, querySection, st, max(0, target-35), min(100, target+35))
 			if err != nil || q == nil {
-				q, err = s.store.GetOneAdaptiveQuestionFromPassage(userID, st, rcPassageID, max(0, target-35), min(100, target+35))
+				continue
 			}
 		}
 
-		// Fall back to any passage
-		if q == nil {
-			q, err = s.store.GetOneAdaptiveQuestion(userID, querySection, st, minDiff, maxDiff)
-			if err != nil || q == nil {
-				q, err = s.store.GetOneAdaptiveQuestion(userID, querySection, st, max(0, target-35), min(100, target+35))
-				if err != nil || q == nil {
-					missingSubtypes = append(missingSubtypes, st)
-					continue
-				}
-			}
+		if !seenQuestionIDs[q.ID] {
+			seenQuestionIDs[q.ID] = true
+			questions = append(questions, *q)
 		}
-
-		// Track the first RC passage found for deduplication
-		if strings.HasPrefix(st, "rc_") && q.Passage != nil && rcPassageID == 0 {
-			rcPassageID = q.Passage.ID
-		}
-
-		questions = append(questions, *q)
 	}
 
-	// Synchronous generation for missing subtypes
-	if len(missingSubtypes) > 0 {
-		difficulty := mapScoreToDifficulty(target)
-
-		for _, st := range missingSubtypes {
-			if len(questions) >= req.Count {
-				break
+	// If we still don't have enough, fetch any unseen questions from the section
+	// regardless of subtype (covers sparse inventory)
+	if len(questions) < req.Count {
+		remaining := req.Count - len(questions)
+		var excludeIDs []int64
+		for id := range seenQuestionIDs {
+			excludeIDs = append(excludeIDs, id)
+		}
+		fallback, err := s.store.GetAdaptiveQuestions(userID, section, nil, minDiff, maxDiff, remaining, excludeIDs)
+		if err == nil {
+			for _, q := range fallback {
+				seenQuestionIDs[q.ID] = true
 			}
-
-			genSection := models.SectionLR
-			if strings.HasPrefix(st, "rc_") {
-				genSection = models.SectionRC
+			questions = append(questions, fallback...)
+		}
+		// Widen window if still short
+		if len(questions) < req.Count {
+			remaining = req.Count - len(questions)
+			excludeIDs = nil
+			for id := range seenQuestionIDs {
+				excludeIDs = append(excludeIDs, id)
 			}
-			genReq := models.GenerateBatchRequest{
-				Section:    genSection,
-				Difficulty: difficulty,
-				Count:      6,
+			fallback, err = s.store.GetAdaptiveQuestions(userID, section, nil, max(0, target-35), min(100, target+35), remaining, excludeIDs)
+			if err == nil {
+				questions = append(questions, fallback...)
 			}
-			if genSection == models.SectionLR {
-				ls := models.LRSubtype(st)
-				genReq.LRSubtype = &ls
-			}
-
-			log.Printf("[quick-drill] Generating for %s/%s", genSection, st)
-			_, genErr := s.GenerateBatch(ctx, genReq)
-			if genErr != nil {
-				log.Printf("WARN: generation failed for %s/%s: %v", genSection, st, genErr)
-				continue
-			}
-
-			querySection := string(genSection)
-			q, err := s.store.GetOneAdaptiveQuestion(userID, querySection, st, 0, 100)
-			if err != nil || q == nil {
-				continue
-			}
-			questions = append(questions, *q)
 		}
 	}
 
