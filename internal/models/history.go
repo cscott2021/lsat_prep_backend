@@ -29,15 +29,16 @@ type HistoryQuestion struct {
 // ── Request Types ────────────────────────────────────────
 
 type HistoryListRequest struct {
-	Section   *string `json:"section"`
-	Subtype   *string `json:"subtype"`
-	Correct   *bool   `json:"correct"`
-	DateFrom  *string `json:"date_from"`
-	DateTo    *string `json:"date_to"`
-	SortBy    string  `json:"sort_by"`
-	SortOrder string  `json:"sort_order"`
-	Page      int     `json:"page"`
-	PageSize  int     `json:"page_size"`
+	Section          *string `json:"section"`
+	Subtype          *string `json:"subtype"`
+	Correct          *bool   `json:"correct"`
+	DateFrom         *string `json:"date_from"`
+	DateTo           *string `json:"date_to"`
+	SortBy           string  `json:"sort_by"`
+	SortOrder        string  `json:"sort_order"`
+	Page             int     `json:"page"`
+	PageSize         int     `json:"page_size"`
+	ExcludeDismissed bool    // internal flag, not JSON-bound
 }
 
 type BookmarkRequest struct {

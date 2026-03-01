@@ -14,8 +14,11 @@ import (
 func (h *Handler) RegisterHistoryRoutes(protected *mux.Router) {
 	protected.HandleFunc("/history", h.GetHistory).Methods("GET")
 	protected.HandleFunc("/history/mistakes", h.GetMistakes).Methods("GET")
+	protected.HandleFunc("/history/mistakes/dismissed", h.GetDismissedMistakes).Methods("GET")
 	protected.HandleFunc("/history/stats", h.GetHistoryStats).Methods("GET")
 	protected.HandleFunc("/history/drill-review", h.GetDrillReview).Methods("POST")
+	protected.HandleFunc("/history/{questionID}/dismiss", h.DismissQuestion).Methods("PATCH")
+	protected.HandleFunc("/history/{questionID}/undismiss", h.UndismissQuestion).Methods("PATCH")
 
 	protected.HandleFunc("/bookmarks", h.GetBookmarks).Methods("GET")
 	protected.HandleFunc("/bookmarks/{questionID}", h.CreateBookmark).Methods("POST")
@@ -221,4 +224,60 @@ func queryStringDefault(r *http.Request, key, defaultVal string) string {
 		return defaultVal
 	}
 	return v
+}
+
+func (h *Handler) DismissQuestion(w http.ResponseWriter, r *http.Request) {
+	userID, ok := getUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, models.ErrorResponse{Error: "Authentication required"})
+		return
+	}
+	questionID, err := strconv.ParseInt(mux.Vars(r)["questionID"], 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "Invalid question ID"})
+		return
+	}
+
+	if err := h.service.DismissQuestion(userID, questionID); err != nil {
+		writeJSON(w, http.StatusNotFound, models.ErrorResponse{Error: "History entry not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "dismissed"})
+}
+
+func (h *Handler) UndismissQuestion(w http.ResponseWriter, r *http.Request) {
+	userID, ok := getUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, models.ErrorResponse{Error: "Authentication required"})
+		return
+	}
+	questionID, err := strconv.ParseInt(mux.Vars(r)["questionID"], 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "Invalid question ID"})
+		return
+	}
+
+	if err := h.service.UndismissQuestion(userID, questionID); err != nil {
+		writeJSON(w, http.StatusNotFound, models.ErrorResponse{Error: "History entry not found or not dismissed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "undismissed"})
+}
+
+func (h *Handler) GetDismissedMistakes(w http.ResponseWriter, r *http.Request) {
+	userID, ok := getUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, models.ErrorResponse{Error: "Authentication required"})
+		return
+	}
+	page := intQueryParam(r.URL.Query(), "page", 1)
+	pageSize := intQueryParam(r.URL.Query(), "page_size", 50)
+
+	resp, err := h.service.GetDismissedMistakes(userID, page, pageSize)
+	if err != nil {
+		log.Printf("[handler] GetDismissedMistakes error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to get dismissed mistakes"})
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

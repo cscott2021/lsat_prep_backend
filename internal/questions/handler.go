@@ -159,7 +159,12 @@ func (h *Handler) SubmitAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.service.SubmitAnswer(userID, id, req.SelectedChoiceID, req.TimeSpentSeconds)
+	source := ""
+	if req.Source != nil {
+		source = *req.Source
+	}
+
+	resp, err := h.service.SubmitAnswer(userID, id, req.SelectedChoiceID, req.TimeSpentSeconds, source)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, models.ErrorResponse{Error: "Question not found"})
 		return
@@ -448,6 +453,60 @@ func (h *Handler) GetPassage(w http.ResponseWriter, r *http.Request) {
 
 	dp := passage.ToDrillPassage()
 	writeJSON(w, http.StatusOK, dp)
+}
+
+func (h *Handler) SimilarDrill(w http.ResponseWriter, r *http.Request) {
+	userID, ok := getUserID(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, models.ErrorResponse{Error: "Authentication required"})
+		return
+	}
+
+	var req models.SimilarDrillRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "Invalid request body"})
+		return
+	}
+
+	if req.ReferenceQuestionID == 0 {
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "reference_question_id is required"})
+		return
+	}
+
+	if req.Section != string(models.SectionLR) && req.Section != string(models.SectionRC) {
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "section must be 'logical_reasoning' or 'reading_comprehension'"})
+		return
+	}
+
+	if req.Section == string(models.SectionLR) {
+		if !models.ValidLRSubtypes[models.LRSubtype(req.Subtype)] {
+			writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "invalid subtype"})
+			return
+		}
+	} else {
+		if !models.ValidRCSubtypes[models.RCSubtype(req.Subtype)] {
+			writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "invalid subtype"})
+			return
+		}
+	}
+
+	questions, err := h.service.GetSimilarDrill(userID, req)
+	if err != nil {
+		log.Printf("[handler] SimilarDrill error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to get similar drill questions"})
+		return
+	}
+
+	count := req.Count
+	if count <= 0 {
+		count = 3
+	}
+	writeJSON(w, http.StatusOK, models.DrillListResponse{
+		Questions: questions,
+		Total:     len(questions),
+		Page:      1,
+		PageSize:  count,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {

@@ -76,6 +76,7 @@ func main() {
 	protected.HandleFunc("/questions/quick-drill", questionHandler.QuickDrill).Methods("POST")
 	protected.HandleFunc("/questions/subtype-drill", questionHandler.SubtypeDrill).Methods("POST")
 	protected.HandleFunc("/questions/rc-drill", questionHandler.RCDrill).Methods("POST")
+	protected.HandleFunc("/questions/similar-drill", questionHandler.SimilarDrill).Methods("POST")
 	protected.HandleFunc("/questions/{id}", questionHandler.GetQuestion).Methods("GET")
 	protected.HandleFunc("/questions/{id}/answer", questionHandler.SubmitAnswer).Methods("POST")
 

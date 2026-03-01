@@ -363,7 +363,7 @@ func (s *Service) GetPassage(passageID int64) (*models.RCPassage, error) {
 
 // ── Answer Submission + Ability Updates ──────────────────
 
-func (s *Service) SubmitAnswer(userID int64, questionID int64, selectedChoiceID string, timeSpentSeconds *float64) (*models.SubmitAnswerResponse, error) {
+func (s *Service) SubmitAnswer(userID int64, questionID int64, selectedChoiceID string, timeSpentSeconds *float64, source string) (*models.SubmitAnswerResponse, error) {
 	question, err := s.store.GetQuestionWithChoices(questionID)
 	if err != nil {
 		return nil, err
@@ -392,8 +392,9 @@ func (s *Service) SubmitAnswer(userID int64, questionID int64, selectedChoiceID 
 	}
 
 	// Gamification: award XP, update daily goal, streak, counters
+	// Skip if source is "similar_drill"
 	var xpAwarded int
-	if s.gamService != nil {
+	if s.gamService != nil && source != "similar_drill" {
 		if isCorrect && abilitySnapshot != nil {
 			xpAwarded = s.gamService.AwardQuestionXP(userID, question.DifficultyScore, abilitySnapshot.SubtypeAbility)
 		}
@@ -1325,4 +1326,64 @@ func (s *Service) GetBookmarks(userID int64, page, pageSize int) (*models.Bookma
 		Page:      page,
 		PageSize:  pageSize,
 	}, nil
+}
+
+// ── Dismiss / Undismiss ───────────────────────────────────
+
+func (s *Service) DismissQuestion(userID, questionID int64) error {
+	if err := s.store.DismissQuestion(userID, questionID); err != nil {
+		return err
+	}
+	go s.store.CleanupOldDismissed(userID)
+	return nil
+}
+
+func (s *Service) UndismissQuestion(userID, questionID int64) error {
+	return s.store.UndismissQuestion(userID, questionID)
+}
+
+func (s *Service) GetDismissedMistakes(userID int64, page, pageSize int) (*models.HistoryListResponse, error) {
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	if pageSize > 50 {
+		pageSize = 50
+	}
+
+	questions, total, err := s.store.GetDismissedMistakes(userID, page, pageSize)
+	if err != nil {
+		return nil, err
+	}
+	if questions == nil {
+		questions = []models.HistoryQuestion{}
+	}
+	return &models.HistoryListResponse{
+		Questions: questions,
+		Total:     total,
+		Page:      page,
+		PageSize:  pageSize,
+	}, nil
+}
+
+// ── Similar Drill ─────────────────────────────────────────
+
+func (s *Service) GetSimilarDrill(userID int64, req models.SimilarDrillRequest) ([]models.DrillQuestion, error) {
+	if req.Count <= 0 {
+		req.Count = 3
+	}
+	if req.Count > 5 {
+		req.Count = 5
+	}
+	return s.store.GetSimilarDrillQuestions(
+		userID,
+		req.ReferenceQuestionID,
+		req.Section,
+		req.Subtype,
+		req.DifficultyScore,
+		req.PassageID,
+		req.Count,
+	)
 }

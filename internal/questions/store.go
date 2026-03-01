@@ -1821,6 +1821,9 @@ func (s *Store) GetUserHistory(userID int64, req models.HistoryListRequest) ([]m
 		args = append(args, *req.DateTo)
 		paramIdx++
 	}
+	if req.ExcludeDismissed {
+		filters = append(filters, "h.dismissed_at IS NULL")
+	}
 
 	filterSQL := ""
 	if len(filters) > 0 {
@@ -1937,11 +1940,12 @@ func (s *Store) GetUserHistory(userID int64, req models.HistoryListRequest) ([]m
 func (s *Store) GetUserMistakes(userID int64, page, pageSize int) ([]models.HistoryQuestion, int, error) {
 	correctVal := false
 	req := models.HistoryListRequest{
-		Correct:   &correctVal,
-		SortBy:    "answered_at",
-		SortOrder: "desc",
-		Page:      page,
-		PageSize:  pageSize,
+		Correct:          &correctVal,
+		SortBy:           "answered_at",
+		SortOrder:        "desc",
+		Page:             page,
+		PageSize:         pageSize,
+		ExcludeDismissed: true,
 	}
 	return s.GetUserHistory(userID, req)
 }
@@ -2370,4 +2374,391 @@ func (s *Store) GetBookmarks(userID int64, page, pageSize int) ([]models.Bookmar
 		bookmarks = []models.BookmarkEntry{}
 	}
 	return bookmarks, total, nil
+}
+
+// ── Dismiss / Undismiss ───────────────────────────────────
+
+func (s *Store) DismissQuestion(userID, questionID int64) error {
+	result, err := s.db.Exec(
+		`UPDATE user_question_history
+		 SET dismissed_at = NOW()
+		 WHERE user_id = $1 AND question_id = $2 AND dismissed_at IS NULL`,
+		userID, questionID,
+	)
+	if err != nil {
+		return fmt.Errorf("dismiss question: %w", err)
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("not found")
+	}
+	return nil
+}
+
+func (s *Store) UndismissQuestion(userID, questionID int64) error {
+	result, err := s.db.Exec(
+		`UPDATE user_question_history
+		 SET dismissed_at = NULL
+		 WHERE user_id = $1 AND question_id = $2 AND dismissed_at IS NOT NULL`,
+		userID, questionID,
+	)
+	if err != nil {
+		return fmt.Errorf("undismiss question: %w", err)
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("not found or not dismissed")
+	}
+	return nil
+}
+
+func (s *Store) CleanupOldDismissed(userID int64) error {
+	_, err := s.db.Exec(
+		`DELETE FROM user_question_history
+		 WHERE user_id = $1
+		   AND correct = false
+		   AND dismissed_at IS NOT NULL
+		   AND id NOT IN (
+		       SELECT id FROM user_question_history
+		       WHERE user_id = $1 AND correct = false AND dismissed_at IS NOT NULL
+		       ORDER BY dismissed_at DESC
+		       LIMIT 50
+		   )`,
+		userID,
+	)
+	return err
+}
+
+func (s *Store) GetDismissedMistakes(userID int64, page, pageSize int) ([]models.HistoryQuestion, int, error) {
+	if pageSize > 50 {
+		pageSize = 50
+	}
+	offset := (page - 1) * pageSize
+
+	var total int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM user_question_history h
+		 JOIN questions q ON q.id = h.question_id
+		 WHERE h.user_id = $1 AND h.correct = false AND h.dismissed_at IS NOT NULL`,
+		userID,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count dismissed mistakes: %w", err)
+	}
+
+	rows, err := s.db.Query(
+		`SELECT q.id, q.section, q.lr_subtype, q.rc_subtype, q.difficulty, q.difficulty_score,
+		        q.stimulus, q.question_stem, q.correct_answer_id, q.explanation, q.passage_id,
+		        h.correct, h.selected_choice_id, h.time_spent_seconds, h.attempt_count, h.answered_at
+		 FROM user_question_history h
+		 JOIN questions q ON q.id = h.question_id
+		 WHERE h.user_id = $1 AND h.correct = false AND h.dismissed_at IS NOT NULL
+		 ORDER BY h.dismissed_at DESC
+		 LIMIT $2 OFFSET $3`,
+		userID, pageSize, offset,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("query dismissed mistakes: %w", err)
+	}
+	defer rows.Close()
+
+	var questions []models.HistoryQuestion
+	var questionIDs []int64
+	passageIDSet := make(map[int64]bool)
+
+	for rows.Next() {
+		var hq models.HistoryQuestion
+		var lrSub, rcSub sql.NullString
+		var passageID sql.NullInt64
+		var selChoice sql.NullString
+		var timeSpent sql.NullFloat64
+
+		if err := rows.Scan(
+			&hq.QuestionID, &hq.Section, &lrSub, &rcSub, &hq.Difficulty, &hq.DifficultyScore,
+			&hq.Stimulus, &hq.QuestionStem, &hq.CorrectAnswerID, &hq.Explanation, &passageID,
+			&hq.Correct, &selChoice, &timeSpent, &hq.AttemptCount, &hq.AnsweredAt,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scan dismissed mistake row: %w", err)
+		}
+		if lrSub.Valid {
+			sub := models.LRSubtype(lrSub.String)
+			hq.LRSubtype = &sub
+		}
+		if rcSub.Valid {
+			sub := models.RCSubtype(rcSub.String)
+			hq.RCSubtype = &sub
+		}
+		if selChoice.Valid {
+			hq.SelectedChoiceID = &selChoice.String
+		}
+		if timeSpent.Valid {
+			hq.TimeSpentSeconds = &timeSpent.Float64
+		}
+		if passageID.Valid {
+			passageIDSet[passageID.Int64] = true
+		}
+		questionIDs = append(questionIDs, hq.QuestionID)
+		questions = append(questions, hq)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	choiceMap, err := s.loadChoicesForQuestions(questionIDs)
+	if err != nil {
+		return nil, 0, err
+	}
+	for i := range questions {
+		questions[i].Choices = choiceMap[questions[i].QuestionID]
+		if questions[i].Choices == nil {
+			questions[i].Choices = []models.AnswerChoice{}
+		}
+	}
+
+	if err := s.attachPassages(questions, questionIDs, passageIDSet); err != nil {
+		return nil, 0, err
+	}
+
+	return questions, total, nil
+}
+
+// ── Similar Drill ─────────────────────────────────────────
+
+func (s *Store) GetSimilarDrillQuestions(
+	userID int64,
+	referenceQuestionID int64,
+	section string,
+	subtype string,
+	difficultyScore int,
+	passageID *int64,
+	count int,
+) ([]models.DrillQuestion, error) {
+	var collected []models.DrillQuestion
+	collectedIDs := map[int64]bool{referenceQuestionID: true}
+
+	// Base exclusion subquery: already-correct questions for this user
+	correctExclusion := `SELECT question_id FROM user_question_history WHERE user_id = $1 AND correct = true`
+
+	addResults := func(rows *sql.Rows, err error) error {
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var q models.DrillQuestion
+			var lrSub, rcSub sql.NullString
+			var passID sql.NullInt64
+			if err := rows.Scan(&q.ID, &q.Section, &lrSub, &rcSub, &q.Difficulty, &q.DifficultyScore,
+				&q.Stimulus, &q.QuestionStem, &passID); err != nil {
+				return err
+			}
+			if lrSub.Valid {
+				sub := models.LRSubtype(lrSub.String)
+				q.LRSubtype = &sub
+			}
+			if rcSub.Valid {
+				sub := models.RCSubtype(rcSub.String)
+				q.RCSubtype = &sub
+			}
+			if passID.Valid {
+				pid := passID.Int64
+				_ = pid // passage attached below
+			}
+			if !collectedIDs[q.ID] {
+				collectedIDs[q.ID] = true
+				collected = append(collected, q)
+			}
+		}
+		return rows.Err()
+	}
+
+	remaining := func() int { return count - len(collected) }
+
+	// Build list of already-collected IDs for NOT IN clauses
+	excludeIDs := func() string {
+		ids := make([]string, 0, len(collectedIDs))
+		for id := range collectedIDs {
+			ids = append(ids, fmt.Sprintf("%d", id))
+		}
+		return strings.Join(ids, ",")
+	}
+
+	// Step 1: RC same-passage priority
+	if passageID != nil && section == "reading_comprehension" && remaining() > 0 {
+		subtypeFilter := ""
+		if subtype != "" {
+			subtypeFilter = fmt.Sprintf("AND q.rc_subtype = '%s'", subtype)
+		}
+		q := fmt.Sprintf(`
+			SELECT q.id, q.section, q.lr_subtype, q.rc_subtype, q.difficulty, q.difficulty_score,
+			       q.stimulus, q.question_stem, q.passage_id
+			FROM questions q
+			WHERE q.passage_id = %d
+			  AND q.id NOT IN (%s)
+			  %s
+			  AND q.validation_status IN ('passed', 'unvalidated')
+			  AND (q.quality_score >= 0.50 OR q.quality_score IS NULL)
+			  AND q.id NOT IN (%s)
+			ORDER BY RANDOM()
+			LIMIT %d`,
+			*passageID, excludeIDs(), subtypeFilter, correctExclusion, remaining())
+		rows, err := s.db.Query(q, userID)
+		if err := addResults(rows, err); err != nil {
+			return nil, fmt.Errorf("similar drill step 1: %w", err)
+		}
+	}
+
+	// Step 2: narrow difficulty band (±15)
+	if remaining() > 0 {
+		subtypeCol := "q.lr_subtype"
+		if strings.HasPrefix(subtype, "rc_") {
+			subtypeCol = "q.rc_subtype"
+		}
+		q := fmt.Sprintf(`
+			SELECT q.id, q.section, q.lr_subtype, q.rc_subtype, q.difficulty, q.difficulty_score,
+			       q.stimulus, q.question_stem, q.passage_id
+			FROM questions q
+			WHERE q.section = '%s'
+			  AND %s = '%s'
+			  AND q.difficulty_score BETWEEN %d AND %d
+			  AND q.id NOT IN (%s)
+			  AND q.validation_status IN ('passed', 'unvalidated')
+			  AND (q.quality_score >= 0.50 OR q.quality_score IS NULL)
+			  AND q.id NOT IN (%s)
+			ORDER BY RANDOM()
+			LIMIT %d`,
+			section, subtypeCol, subtype,
+			max(0, difficultyScore-15), min(100, difficultyScore+15),
+			excludeIDs(), correctExclusion, remaining())
+		rows, err := s.db.Query(q, userID)
+		if err := addResults(rows, err); err != nil {
+			return nil, fmt.Errorf("similar drill step 2: %w", err)
+		}
+	}
+
+	// Step 3: wider difficulty band (±30)
+	if remaining() > 0 {
+		subtypeCol := "q.lr_subtype"
+		if strings.HasPrefix(subtype, "rc_") {
+			subtypeCol = "q.rc_subtype"
+		}
+		q := fmt.Sprintf(`
+			SELECT q.id, q.section, q.lr_subtype, q.rc_subtype, q.difficulty, q.difficulty_score,
+			       q.stimulus, q.question_stem, q.passage_id
+			FROM questions q
+			WHERE q.section = '%s'
+			  AND %s = '%s'
+			  AND q.difficulty_score BETWEEN %d AND %d
+			  AND q.id NOT IN (%s)
+			  AND q.validation_status IN ('passed', 'unvalidated')
+			  AND (q.quality_score >= 0.50 OR q.quality_score IS NULL)
+			  AND q.id NOT IN (%s)
+			ORDER BY RANDOM()
+			LIMIT %d`,
+			section, subtypeCol, subtype,
+			max(0, difficultyScore-30), min(100, difficultyScore+30),
+			excludeIDs(), correctExclusion, remaining())
+		rows, err := s.db.Query(q, userID)
+		if err := addResults(rows, err); err != nil {
+			return nil, fmt.Errorf("similar drill step 3: %w", err)
+		}
+	}
+
+	// Step 4: absolute fallback — any unseen in subtype, no difficulty filter
+	if remaining() > 0 {
+		subtypeCol := "q.lr_subtype"
+		if strings.HasPrefix(subtype, "rc_") {
+			subtypeCol = "q.rc_subtype"
+		}
+		q := fmt.Sprintf(`
+			SELECT q.id, q.section, q.lr_subtype, q.rc_subtype, q.difficulty, q.difficulty_score,
+			       q.stimulus, q.question_stem, q.passage_id
+			FROM questions q
+			WHERE q.section = '%s'
+			  AND %s = '%s'
+			  AND q.id NOT IN (%s)
+			  AND q.validation_status IN ('passed', 'unvalidated')
+			  AND (q.quality_score >= 0.50 OR q.quality_score IS NULL)
+			  AND q.id NOT IN (%s)
+			ORDER BY RANDOM()
+			LIMIT %d`,
+			section, subtypeCol, subtype,
+			excludeIDs(), correctExclusion, remaining())
+		rows, err := s.db.Query(q, userID)
+		if err := addResults(rows, err); err != nil {
+			return nil, fmt.Errorf("similar drill step 4: %w", err)
+		}
+	}
+
+	if len(collected) == 0 {
+		return []models.DrillQuestion{}, nil
+	}
+
+	// Batch load choices
+	ids := make([]int64, len(collected))
+	for i, q := range collected {
+		ids[i] = q.ID
+	}
+	choiceMap, err := s.loadChoicesForQuestions(ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range collected {
+		ac := choiceMap[collected[i].ID]
+		for _, c := range ac {
+			collected[i].Choices = append(collected[i].Choices, models.DrillChoice{
+				ChoiceID:   c.ChoiceID,
+				ChoiceText: c.ChoiceText,
+			})
+		}
+		if collected[i].Choices == nil {
+			collected[i].Choices = []models.DrillChoice{}
+		}
+	}
+
+	// Attach passages for RC questions
+	if section == "reading_comprehension" {
+		passIDSet := map[int64]bool{}
+		// Re-query passage IDs for collected questions (we dropped passageID above for simplicity)
+		placeholders := make([]string, len(ids))
+		qargs := make([]interface{}, len(ids))
+		for i, id := range ids {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+			qargs[i] = id
+		}
+		pidRows, err := s.db.Query(
+			fmt.Sprintf(`SELECT id, passage_id FROM questions WHERE id IN (%s) AND passage_id IS NOT NULL`,
+				strings.Join(placeholders, ",")),
+			qargs...,
+		)
+		if err == nil {
+			defer pidRows.Close()
+			qidToPassID := map[int64]int64{}
+			for pidRows.Next() {
+				var qid, pid int64
+				if pidRows.Scan(&qid, &pid) == nil {
+					qidToPassID[qid] = pid
+					passIDSet[pid] = true
+				}
+			}
+			if len(passIDSet) > 0 {
+				passIDSlice := make([]int64, 0, len(passIDSet))
+				for pid := range passIDSet {
+					passIDSlice = append(passIDSlice, pid)
+				}
+				passageMap, err := s.loadPassagesForIDs(passIDSlice)
+				if err == nil {
+					for i, q := range collected {
+						if pid, ok := qidToPassID[q.ID]; ok {
+							if p, ok2 := passageMap[pid]; ok2 {
+								pCopy := p
+								collected[i].Passage = &pCopy
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return collected, nil
 }

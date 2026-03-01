@@ -213,6 +213,16 @@ type GenerateBatchRequest struct {
 type SubmitAnswerRequest struct {
 	SelectedChoiceID string   `json:"selected_choice_id"`
 	TimeSpentSeconds *float64 `json:"time_spent_seconds,omitempty"`
+	Source           *string  `json:"source,omitempty"`
+}
+
+type SimilarDrillRequest struct {
+	ReferenceQuestionID int64  `json:"reference_question_id"`
+	Section             string `json:"section"`
+	Subtype             string `json:"subtype"`
+	DifficultyScore     int    `json:"difficulty_score"`
+	PassageID           *int64 `json:"passage_id,omitempty"`
+	Count               int    `json:"count"`
 }
 
 type RCDrillRequest struct {
