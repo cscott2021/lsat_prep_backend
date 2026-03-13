@@ -13,6 +13,7 @@ import (
 	"github.com/lsat-prep/backend/internal/database"
 	"github.com/lsat-prep/backend/internal/gamification"
 	"github.com/lsat-prep/backend/internal/generator"
+	"github.com/lsat-prep/backend/internal/learn"
 	"github.com/lsat-prep/backend/internal/middleware"
 	"github.com/lsat-prep/backend/internal/questions"
 	"github.com/rs/cors"
@@ -44,6 +45,11 @@ func main() {
 	gamService := gamification.NewService(gamStore)
 	gamHandler := gamification.NewHandler(gamService)
 	questionService.SetGamificationService(gamService)
+
+	// Initialize learn
+	learnStore := learn.NewStore(db)
+	learnService := learn.NewService(learnStore)
+	learnHandler := learn.NewHandler(learnService)
 
 	// Start background workers
 	ctx, cancel := context.WithCancel(context.Background())
@@ -115,6 +121,11 @@ func main() {
 
 	// History & bookmarks
 	questionHandler.RegisterHistoryRoutes(protected)
+
+	// Learn (fixed path before parameterized)
+	protected.HandleFunc("/learn/guides/by-subtype", learnHandler.GetGuideBySubtype).Methods("GET")
+	protected.HandleFunc("/learn/guides", learnHandler.ListGuides).Methods("GET")
+	protected.HandleFunc("/learn/guides/{id}", learnHandler.GetGuide).Methods("GET")
 
 	// Health check
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
