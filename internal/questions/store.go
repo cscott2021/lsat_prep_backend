@@ -487,8 +487,13 @@ func (s *Store) GetAllAbilities(userID int64) (*models.AbilityResponse, error) {
 
 // ── Question History ────────────────────────────────────
 
-func (s *Store) RecordAnswer(userID, questionID int64, correct bool, selectedChoiceID *string, timeSpentSeconds *float64) error {
-	_, err := s.db.Exec(
+// RecordAnswer upserts the user's answer for a question and reports whether
+// this was the FIRST attempt at that question (true = newly inserted row).
+// Callers use firstAttempt to award XP/gamification only once, so replaying a
+// known-correct answer cannot farm XP or inflate the leaderboard.
+func (s *Store) RecordAnswer(userID, questionID int64, correct bool, selectedChoiceID *string, timeSpentSeconds *float64) (bool, error) {
+	var attemptCount int
+	err := s.db.QueryRow(
 		`INSERT INTO user_question_history (user_id, question_id, correct, selected_choice_id, time_spent_seconds, attempt_count)
 		 VALUES ($1, $2, $3, $4, $5, 1)
 		 ON CONFLICT (user_id, question_id)
@@ -497,10 +502,14 @@ func (s *Store) RecordAnswer(userID, questionID int64, correct bool, selectedCho
 		    selected_choice_id = $4,
 		    time_spent_seconds = $5,
 		    attempt_count = user_question_history.attempt_count + 1,
-		    answered_at = NOW()`,
+		    answered_at = NOW()
+		 RETURNING attempt_count`,
 		userID, questionID, correct, selectedChoiceID, timeSpentSeconds,
-	)
-	return err
+	).Scan(&attemptCount)
+	if err != nil {
+		return false, err
+	}
+	return attemptCount == 1, nil
 }
 
 // CountUnseenForUser counts servable questions in a section+subtype that the
@@ -1115,8 +1124,15 @@ func (s *Store) GetRecalibrationCandidates(minResponses int) ([]models.Recalibra
 	return candidates, rows.Err()
 }
 
-func (s *Store) UpdateQuestionDifficulty(questionID int64, difficulty string) error {
-	_, err := s.db.Exec(`UPDATE questions SET difficulty = $1 WHERE id = $2`, difficulty, questionID)
+// UpdateQuestionDifficulty updates BOTH the difficulty label and the
+// difficulty_score. Adaptive serving filters exclusively on difficulty_score,
+// so updating only the label (as this once did) made recalibration a no-op with
+// no effect on which questions users actually get.
+func (s *Store) UpdateQuestionDifficulty(questionID int64, difficulty string, difficultyScore int) error {
+	_, err := s.db.Exec(
+		`UPDATE questions SET difficulty = $1, difficulty_score = $2 WHERE id = $3`,
+		difficulty, difficultyScore, questionID,
+	)
 	return err
 }
 

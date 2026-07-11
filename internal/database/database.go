@@ -25,7 +25,10 @@ func Connect() (*sql.DB, error) {
 	user := getEnv("DB_USER", "lsat_user")
 	password := getEnv("DB_PASSWORD", "lsat_password")
 	dbname := getEnv("DB_NAME", "lsat_prep")
-	sslmode := getEnv("DB_SSLMODE", "disable")
+	// Secure by default: require TLS to the database unless explicitly opted out
+	// (local docker-compose sets DB_SSLMODE=disable). A "fail open" default of
+	// disable risks sending credentials in cleartext if the env var is unset.
+	sslmode := getEnv("DB_SSLMODE", "require")
 
 	dsn := fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",

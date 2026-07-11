@@ -115,6 +115,9 @@ func (h *Handler) GlobalLeaderboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	limit := intQueryParam(r.URL.Query(), "limit", 20)
+	if limit < 1 || limit > 100 {
+		limit = 20 // clamp: bound the leaderboard scan / result size
+	}
 
 	resp, err := h.service.GetGlobalLeaderboard(userID, limit)
 	if err != nil {

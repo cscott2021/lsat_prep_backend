@@ -46,6 +46,10 @@
         {
           "name": "ANTHROPIC_API_KEY",
           "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/staging/ANTHROPIC_API_KEY"
+        },
+        {
+          "name": "JWT_SECRET",
+          "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/staging/JWT_SECRET"
         }
       ],
       "logConfiguration": {

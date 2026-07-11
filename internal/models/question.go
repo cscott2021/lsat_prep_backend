@@ -182,20 +182,20 @@ func (p *RCPassage) ToDrillPassage() DrillPassage {
 }
 
 type ValidationLog struct {
-	ID                  int64     `json:"id"`
-	QuestionID          *int64    `json:"question_id,omitempty"`
-	BatchID             *int64    `json:"batch_id,omitempty"`
-	Stage               string    `json:"stage"`
-	ModelUsed           string    `json:"model_used,omitempty"`
-	GeneratedAnswer     string    `json:"generated_answer,omitempty"`
-	ValidatorAnswer     string    `json:"validator_answer,omitempty"`
-	Matches             *bool     `json:"matches,omitempty"`
-	Confidence          string    `json:"confidence,omitempty"`
-	Reasoning           string    `json:"reasoning,omitempty"`
-	AdversarialDetails  string    `json:"adversarial_details,omitempty"`
-	PromptTokens        int       `json:"prompt_tokens,omitempty"`
-	OutputTokens        int       `json:"output_tokens,omitempty"`
-	CreatedAt           time.Time `json:"created_at"`
+	ID                 int64     `json:"id"`
+	QuestionID         *int64    `json:"question_id,omitempty"`
+	BatchID            *int64    `json:"batch_id,omitempty"`
+	Stage              string    `json:"stage"`
+	ModelUsed          string    `json:"model_used,omitempty"`
+	GeneratedAnswer    string    `json:"generated_answer,omitempty"`
+	ValidatorAnswer    string    `json:"validator_answer,omitempty"`
+	Matches            *bool     `json:"matches,omitempty"`
+	Confidence         string    `json:"confidence,omitempty"`
+	Reasoning          string    `json:"reasoning,omitempty"`
+	AdversarialDetails string    `json:"adversarial_details,omitempty"`
+	PromptTokens       int       `json:"prompt_tokens,omitempty"`
+	OutputTokens       int       `json:"output_tokens,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
 }
 
 // ── Request Types ─────────────────────────────────────
@@ -252,12 +252,12 @@ type GenerateBatchResponse struct {
 }
 
 type SubmitAnswerResponse struct {
-	Correct         bool              `json:"correct"`
-	CorrectAnswerID string            `json:"correct_answer_id"`
-	Explanation     string            `json:"explanation"`
-	Choices         []AnswerChoice    `json:"choices"`
-	AbilityUpdated  *AbilitySnapshot  `json:"ability_updated,omitempty"`
-	XPAwarded       int               `json:"xp_awarded"`
+	Correct         bool             `json:"correct"`
+	CorrectAnswerID string           `json:"correct_answer_id"`
+	Explanation     string           `json:"explanation"`
+	Choices         []AnswerChoice   `json:"choices"`
+	AbilityUpdated  *AbilitySnapshot `json:"ability_updated,omitempty"`
+	XPAwarded       int              `json:"xp_awarded"`
 }
 
 type QuestionListResponse struct {
@@ -307,24 +307,24 @@ type DrillListResponse struct {
 // ── Admin Types ───────────────────────────────────────
 
 type QualityStats struct {
-	TotalGenerated   int                `json:"total_generated"`
-	TotalPassed      int                `json:"total_passed"`
-	TotalFlagged     int                `json:"total_flagged"`
-	TotalRejected    int                `json:"total_rejected"`
-	PassRate         float64            `json:"pass_rate"`
-	QualityDistribution map[string]int  `json:"quality_score_distribution"`
+	TotalGenerated      int            `json:"total_generated"`
+	TotalPassed         int            `json:"total_passed"`
+	TotalFlagged        int            `json:"total_flagged"`
+	TotalRejected       int            `json:"total_rejected"`
+	PassRate            float64        `json:"pass_rate"`
+	QualityDistribution map[string]int `json:"quality_score_distribution"`
 }
 
 type GenerationStats struct {
-	Cost   CostStats   `json:"cost"`
+	Cost    CostStats  `json:"cost"`
 	Batches BatchStats `json:"batches"`
-	Tokens TokenStats  `json:"tokens"`
+	Tokens  TokenStats `json:"tokens"`
 }
 
 type CostStats struct {
-	TodayCents     int `json:"today_cents"`
-	ThisWeekCents  int `json:"this_week_cents"`
-	ThisMonthCents int `json:"this_month_cents"`
+	TodayCents      int `json:"today_cents"`
+	ThisWeekCents   int `json:"this_week_cents"`
+	ThisMonthCents  int `json:"this_month_cents"`
 	DailyLimitCents int `json:"daily_limit_cents"`
 }
 
@@ -335,17 +335,17 @@ type BatchStats struct {
 }
 
 type TokenStats struct {
-	GenerationTotal  int `json:"generation_total"`
-	ValidationTotal  int `json:"validation_total"`
+	GenerationTotal int `json:"generation_total"`
+	ValidationTotal int `json:"validation_total"`
 }
 
 type RecalibrationCandidate struct {
 	QuestionID          int64   `json:"question_id"`
 	LabeledDifficulty   string  `json:"labeled_difficulty"`
-	ActualAccuracy       float64 `json:"actual_accuracy"`
-	SuggestedDifficulty  string  `json:"suggested_difficulty"`
-	TimesServed          int     `json:"times_served"`
-	TimesCorrect         int     `json:"times_correct"`
+	ActualAccuracy      float64 `json:"actual_accuracy"`
+	SuggestedDifficulty string  `json:"suggested_difficulty"`
+	TimesServed         int     `json:"times_served"`
+	TimesCorrect        int     `json:"times_correct"`
 }
 
 type RecalibrationReport struct {
@@ -358,7 +358,7 @@ type RecalibrationReport struct {
 
 type ExportEnvelope struct {
 	Version    int              `json:"version"`
-	ExportedAt time.Time       `json:"exported_at"`
+	ExportedAt time.Time        `json:"exported_at"`
 	Questions  []ExportQuestion `json:"questions"`
 }
 

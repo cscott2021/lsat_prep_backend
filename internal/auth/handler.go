@@ -3,7 +3,9 @@ package auth
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -13,9 +15,23 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// JWTSecret is the HMAC signing key for auth tokens.
-// This is a server-side secret — it never leaves the backend.
-var JWTSecret = []byte("lsat-prep-staging-signing-key-2026")
+// JWTSecret is the HMAC signing key for auth tokens. It is loaded from the
+// environment at startup by InitJWTSecret and is deliberately NOT defaulted:
+// a hardcoded key in source (as this once was) lets anyone with repo access
+// forge a valid token for any user.
+var JWTSecret []byte
+
+// InitJWTSecret loads the HMAC signing key from the JWT_SECRET environment
+// variable. It fails fast if the key is absent or too short so the server never
+// starts with a weak or missing secret.
+func InitJWTSecret() error {
+	secret := os.Getenv("JWT_SECRET")
+	if len(secret) < 32 {
+		return fmt.Errorf("JWT_SECRET must be set to at least 32 characters (got %d)", len(secret))
+	}
+	JWTSecret = []byte(secret)
+	return nil
+}
 
 type Handler struct {
 	db *sql.DB

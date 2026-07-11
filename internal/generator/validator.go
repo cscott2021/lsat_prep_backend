@@ -58,13 +58,13 @@ type ValidationResult struct {
 }
 
 type BatchValidationResult struct {
-	TotalQuestions int                `json:"total_questions"`
-	PassedCount    int                `json:"passed_count"`
-	FlaggedCount   int                `json:"flagged_count"`
-	RejectedCount  int                `json:"rejected_count"`
-	Results        []ValidationResult `json:"results"`
-	TotalPromptTokens int            `json:"total_prompt_tokens"`
-	TotalOutputTokens int            `json:"total_output_tokens"`
+	TotalQuestions    int                `json:"total_questions"`
+	PassedCount       int                `json:"passed_count"`
+	FlaggedCount      int                `json:"flagged_count"`
+	RejectedCount     int                `json:"rejected_count"`
+	Results           []ValidationResult `json:"results"`
+	TotalPromptTokens int                `json:"total_prompt_tokens"`
+	TotalOutputTokens int                `json:"total_output_tokens"`
 }
 
 type verificationResponse struct {
@@ -87,14 +87,24 @@ func (v *Validator) ValidateBatch(ctx context.Context, batch *GeneratedBatch) (*
 	for i, q := range batch.Questions {
 		vr, err := v.ValidateQuestion(ctx, q, batch.Passage)
 		if err != nil {
-			log.Printf("WARN: validation failed for question %d: %v — passing as unvalidated", i+1, err)
-			vr = &ValidationResult{
+			// A validation-infrastructure failure (rate-limit, timeout,
+			// unparseable response) is NOT a wrong answer. Keep the question as
+			// FLAGGED (low-confidence, for later review) and skip the answer
+			// recompute below. Previously the fallback left SelectedAnswer empty,
+			// so the "" == CorrectAnswerID check flipped Matches back to false and
+			// the question was silently rejected and dropped — wasting paid
+			// generation and, on a broadly-failing validator, zeroing whole batches.
+			log.Printf("WARN: validation failed for question %d: %v — flagging as unvalidated", i+1, err)
+			result.FlaggedCount++
+			result.Results = append(result.Results, ValidationResult{
 				QuestionIndex:   i,
 				GeneratedAnswer: q.CorrectAnswerID,
+				SelectedAnswer:  q.CorrectAnswerID,
 				Matches:         true,
 				Confidence:      "low",
 				Reasoning:       fmt.Sprintf("validation error: %v", err),
-			}
+			})
+			continue
 		}
 		vr.QuestionIndex = i
 		vr.GeneratedAnswer = q.CorrectAnswerID

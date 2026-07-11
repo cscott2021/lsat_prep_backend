@@ -3,8 +3,8 @@ package generator
 // StructuralScore holds the individual structural compliance checks.
 type StructuralScore struct {
 	StimulusLengthOK       bool
-	AllChoicesInRange       bool
-	AllExplanationsPresent  bool
+	AllChoicesInRange      bool
+	AllExplanationsPresent bool
 	CorrectAnswerDistribOK bool
 }
 
@@ -30,8 +30,8 @@ func ComputeStructuralScore(q GeneratedQuestion, isRC bool) StructuralScore {
 
 	return StructuralScore{
 		StimulusLengthOK:       stimOK,
-		AllChoicesInRange:       choicesOK,
-		AllExplanationsPresent:  explOK,
+		AllChoicesInRange:      choicesOK,
+		AllExplanationsPresent: explOK,
 		CorrectAnswerDistribOK: true, // Set externally based on batch-level analysis
 	}
 }

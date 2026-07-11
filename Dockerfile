@@ -12,5 +12,14 @@ RUN apk --no-cache add ca-certificates
 WORKDIR /app
 COPY --from=builder /app/server .
 
+# Run as an unprivileged user rather than root.
+RUN addgroup -S app && adduser -S -G app app
+USER app
+
 EXPOSE 8080
+
+# Liveness probe against the existing /health endpoint (busybox wget).
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD wget -q -O /dev/null http://localhost:8080/health || exit 1
+
 CMD ["./server"]

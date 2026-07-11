@@ -7,8 +7,27 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/lsat-prep/backend/internal/models"
 )
+
+// GetDrillResults returns, among the given question IDs, how many this user has
+// actually answered (total) and how many correctly (correct), read from the
+// authoritative answer history. Drill completion uses this instead of the
+// client-supplied correct_ids so a client cannot forge a perfect drill.
+func (s *Store) GetDrillResults(userID int64, questionIDs []int64) (int, int, error) {
+	if len(questionIDs) == 0 {
+		return 0, 0, nil
+	}
+	var total, correct int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*), COUNT(*) FILTER (WHERE correct)
+		 FROM user_question_history
+		 WHERE user_id = $1 AND question_id = ANY($2)`,
+		userID, pq.Array(questionIDs),
+	).Scan(&total, &correct)
+	return total, correct, err
+}
 
 type Store struct {
 	db *sql.DB
@@ -54,25 +73,55 @@ func (s *Store) GetOrCreateGamification(userID int64) (*models.UserGamification,
 	return &g, nil
 }
 
+// UpdateGamification persists the streak and daily-goal fields, which are
+// read-modify-write state owned by UpdateStreak / UpdateDailyGoal.
+//
+// It deliberately does NOT write the columns that have a competing atomic
+// writer — total_xp/weekly_xp (AddXP/ResetWeeklyXP), gems (AwardGems/
+// BuyStreakFreeze), questions_*_total (IncrementCounters), drills_*_total
+// (IncrementDrillCounters) and league_tier (ProcessLeagueChanges). Writing
+// those from an in-memory snapshot read earlier would clobber a concurrent
+// atomic increment (the caller's struct is stale by the time this runs); that
+// bug was silently erasing all drill-completion XP on every drill.
+//
+// NOTE: streak_freezes_owned/streak_freeze_active are still written here from a
+// snapshot and also mutated atomically by BuyStreakFreeze. That residual
+// read-modify-write is safe on a single instance but should move to a
+// SELECT ... FOR UPDATE transaction if this service is ever scaled out.
 func (s *Store) UpdateGamification(userID int64, g *models.UserGamification) error {
 	_, err := s.db.Exec(
 		`UPDATE user_gamification SET
-		    total_xp = $2, weekly_xp = $3,
-		    current_streak = $4, longest_streak = $5, last_active_date = $6,
-		    streak_freeze_active = $7, streak_freezes_owned = $8, gems = $9,
-		    daily_goal_target = $10, daily_goal_progress = $11, daily_goal_date = $12,
-		    league_tier = $13, questions_answered_total = $14, questions_correct_total = $15,
-		    drills_completed_total = $16, perfect_drills_total = $17,
+		    current_streak = $2, longest_streak = $3, last_active_date = $4,
+		    streak_freeze_active = $5, streak_freezes_owned = $6,
+		    daily_goal_target = $7, daily_goal_progress = $8, daily_goal_date = $9,
 		    updated_at = NOW()
 		 WHERE user_id = $1`,
-		userID, g.TotalXP, g.WeeklyXP,
+		userID,
 		g.CurrentStreak, g.LongestStreak, g.LastActiveDate,
-		g.StreakFreezeActive, g.StreakFreezesOwned, g.Gems,
+		g.StreakFreezeActive, g.StreakFreezesOwned,
 		g.DailyGoalTarget, g.DailyGoalProgress, g.DailyGoalDate,
-		g.LeagueTier, g.QuestionsAnsweredTotal, g.QuestionsCorrectTotal,
-		g.DrillsCompletedTotal, g.PerfectDrillsTotal,
 	)
 	return err
+}
+
+// IncrementDrillCounters atomically bumps the drill counters and returns the
+// new drills_completed_total (used to detect the first-ever drill).
+func (s *Store) IncrementDrillCounters(userID int64, perfect bool) (int, error) {
+	perfectInc := 0
+	if perfect {
+		perfectInc = 1
+	}
+	var drillsCompleted int
+	err := s.db.QueryRow(
+		`UPDATE user_gamification SET
+		    drills_completed_total = drills_completed_total + 1,
+		    perfect_drills_total = perfect_drills_total + $2,
+		    updated_at = NOW()
+		 WHERE user_id = $1
+		 RETURNING drills_completed_total`,
+		userID, perfectInc,
+	).Scan(&drillsCompleted)
+	return drillsCompleted, err
 }
 
 func (s *Store) IncrementCounters(userID int64, correct bool) error {
@@ -231,10 +280,23 @@ func (s *Store) ProcessLeagueChanges() ([]LeagueChange, error) {
 		newTier := evaluateLeague(tier, weeklyXP)
 		if newTier != tier {
 			changes = append(changes, LeagueChange{UserID: userID, OldTier: tier, NewTier: newTier})
-			s.db.Exec(`UPDATE user_gamification SET league_tier = $1 WHERE user_id = $2`, newTier, userID)
 		}
 	}
-	return changes, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Apply updates only after the result set is fully read and closed — running
+	// writes on the same connection while a query is still streaming rows is
+	// fragile, and the write error was previously swallowed.
+	for _, c := range changes {
+		if _, err := s.db.Exec(
+			`UPDATE user_gamification SET league_tier = $1 WHERE user_id = $2`,
+			c.NewTier, c.UserID,
+		); err != nil {
+			return changes, fmt.Errorf("apply league change for user %d: %w", c.UserID, err)
+		}
+	}
+	return changes, nil
 }
 
 func evaluateLeague(currentTier string, weeklyXP int64) string {
@@ -366,7 +428,7 @@ func (s *Store) GetFriends(userID int64) (*models.FriendsResponse, error) {
 		f.DisplayName = formatDisplayName(fullName)
 		if lastActive != nil {
 			f.LastActiveDate = lastActive.Format("2006-01-02")
-			f.IsOnlineToday = lastActive.Truncate(24*time.Hour).Equal(today)
+			f.IsOnlineToday = lastActive.Truncate(24 * time.Hour).Equal(today)
 		}
 		resp.Friends = append(resp.Friends, f)
 	}
@@ -629,13 +691,20 @@ func (s *Store) GetUserAchievements(userID int64) ([]string, error) {
 	return achievements, rows.Err()
 }
 
-func (s *Store) AwardAchievement(userID int64, achievement string) error {
-	_, err := s.db.Exec(
+// AwardAchievement records an achievement idempotently and reports whether a
+// new row was actually inserted (false = the user already had it). Callers use
+// the inserted flag to gate one-time gem rewards.
+func (s *Store) AwardAchievement(userID int64, achievement string) (bool, error) {
+	res, err := s.db.Exec(
 		`INSERT INTO achievements (user_id, achievement) VALUES ($1, $2)
 		 ON CONFLICT (user_id, achievement) DO NOTHING`,
 		userID, achievement,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 func (s *Store) AwardGems(userID int64, amount int) error {

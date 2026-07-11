@@ -5,26 +5,26 @@ import "time"
 // ── Core Gamification Structs ─────────────────────────────
 
 type UserGamification struct {
-	UserID                int64      `json:"user_id"`
-	TotalXP               int64      `json:"total_xp"`
-	WeeklyXP              int64      `json:"weekly_xp"`
-	WeeklyXPResetAt       time.Time  `json:"weekly_xp_reset_at"`
-	CurrentStreak         int        `json:"current_streak"`
-	LongestStreak         int        `json:"longest_streak"`
-	LastActiveDate        *time.Time `json:"last_active_date"`
-	StreakFreezeActive    bool       `json:"streak_freeze_active"`
-	StreakFreezesOwned    int        `json:"streak_freezes_owned"`
-	Gems                  int        `json:"gems"`
-	DailyGoalTarget       int        `json:"daily_goal_target"`
-	DailyGoalProgress     int        `json:"daily_goal_progress"`
-	DailyGoalDate         time.Time  `json:"daily_goal_date"`
-	LeagueTier            string     `json:"league_tier"`
-	QuestionsAnsweredTotal int       `json:"questions_answered_total"`
-	QuestionsCorrectTotal  int       `json:"questions_correct_total"`
-	DrillsCompletedTotal   int       `json:"drills_completed_total"`
-	PerfectDrillsTotal     int       `json:"perfect_drills_total"`
-	CreatedAt             time.Time  `json:"created_at"`
-	UpdatedAt             time.Time  `json:"updated_at"`
+	UserID                 int64      `json:"user_id"`
+	TotalXP                int64      `json:"total_xp"`
+	WeeklyXP               int64      `json:"weekly_xp"`
+	WeeklyXPResetAt        time.Time  `json:"weekly_xp_reset_at"`
+	CurrentStreak          int        `json:"current_streak"`
+	LongestStreak          int        `json:"longest_streak"`
+	LastActiveDate         *time.Time `json:"last_active_date"`
+	StreakFreezeActive     bool       `json:"streak_freeze_active"`
+	StreakFreezesOwned     int        `json:"streak_freezes_owned"`
+	Gems                   int        `json:"gems"`
+	DailyGoalTarget        int        `json:"daily_goal_target"`
+	DailyGoalProgress      int        `json:"daily_goal_progress"`
+	DailyGoalDate          time.Time  `json:"daily_goal_date"`
+	LeagueTier             string     `json:"league_tier"`
+	QuestionsAnsweredTotal int        `json:"questions_answered_total"`
+	QuestionsCorrectTotal  int        `json:"questions_correct_total"`
+	DrillsCompletedTotal   int        `json:"drills_completed_total"`
+	PerfectDrillsTotal     int        `json:"perfect_drills_total"`
+	CreatedAt              time.Time  `json:"created_at"`
+	UpdatedAt              time.Time  `json:"updated_at"`
 }
 
 type XPEvent struct {
@@ -93,31 +93,31 @@ type SendNudgeRequest struct {
 // ── Response Types ────────────────────────────────────────
 
 type GamificationResponse struct {
-	TotalXP               int64    `json:"total_xp"`
-	WeeklyXP              int64    `json:"weekly_xp"`
-	CurrentStreak         int      `json:"current_streak"`
-	LongestStreak         int      `json:"longest_streak"`
-	StreakFreezeActive    bool     `json:"streak_freeze_active"`
-	StreakFreezesOwned    int      `json:"streak_freezes_owned"`
-	Gems                  int      `json:"gems"`
-	DailyGoalTarget       int      `json:"daily_goal_target"`
-	DailyGoalProgress     int      `json:"daily_goal_progress"`
-	LeagueTier            string   `json:"league_tier"`
-	QuestionsAnsweredTotal int     `json:"questions_answered_total"`
-	QuestionsCorrectTotal  int     `json:"questions_correct_total"`
-	DrillsCompletedTotal   int     `json:"drills_completed_total"`
-	PerfectDrillsTotal     int     `json:"perfect_drills_total"`
-	Achievements          []string `json:"achievements"`
-	UnreadNudges          int      `json:"unread_nudges"`
+	TotalXP                int64    `json:"total_xp"`
+	WeeklyXP               int64    `json:"weekly_xp"`
+	CurrentStreak          int      `json:"current_streak"`
+	LongestStreak          int      `json:"longest_streak"`
+	StreakFreezeActive     bool     `json:"streak_freeze_active"`
+	StreakFreezesOwned     int      `json:"streak_freezes_owned"`
+	Gems                   int      `json:"gems"`
+	DailyGoalTarget        int      `json:"daily_goal_target"`
+	DailyGoalProgress      int      `json:"daily_goal_progress"`
+	LeagueTier             string   `json:"league_tier"`
+	QuestionsAnsweredTotal int      `json:"questions_answered_total"`
+	QuestionsCorrectTotal  int      `json:"questions_correct_total"`
+	DrillsCompletedTotal   int      `json:"drills_completed_total"`
+	PerfectDrillsTotal     int      `json:"perfect_drills_total"`
+	Achievements           []string `json:"achievements"`
+	UnreadNudges           int      `json:"unread_nudges"`
 }
 
 type DrillCompleteResponse struct {
-	XPBreakdown          XPBreakdown    `json:"xp_breakdown"`
-	GemsEarned           int            `json:"gems_earned"`
-	Streak               StreakInfo     `json:"streak"`
-	DailyGoal            DailyGoalInfo  `json:"daily_goal"`
-	AchievementsUnlocked []string       `json:"achievements_unlocked"`
-	LeagueTier           string         `json:"league_tier"`
+	XPBreakdown          XPBreakdown   `json:"xp_breakdown"`
+	GemsEarned           int           `json:"gems_earned"`
+	Streak               StreakInfo    `json:"streak"`
+	DailyGoal            DailyGoalInfo `json:"daily_goal"`
+	AchievementsUnlocked []string      `json:"achievements_unlocked"`
+	LeagueTier           string        `json:"league_tier"`
 }
 
 type XPBreakdown struct {
@@ -217,7 +217,7 @@ type NudgeEntry struct {
 }
 
 type StreakFreezeResponse struct {
-	GemsRemaining    int `json:"gems_remaining"`
+	GemsRemaining      int `json:"gems_remaining"`
 	StreakFreezesOwned int `json:"streak_freezes_owned"`
 }
 

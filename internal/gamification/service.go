@@ -91,9 +91,13 @@ func (s *Service) UpdateStreak(userID int64) error {
 		3: 10, 7: 25, 14: 50, 30: 100, 60: 200, 100: 500, 365: 1000,
 	}
 	if gems, ok := streakMilestones[gam.CurrentStreak]; ok {
-		gam.Gems += gems
+		// Gems are mutated via the atomic AwardGems path, not the full-row
+		// UpdateGamification write (which no longer touches the gems column).
+		if err := s.store.AwardGems(userID, gems); err != nil {
+			log.Printf("[gamification] failed to award streak-milestone gems: %v", err)
+		}
 		s.store.LogXPEvent(userID, "streak_milestone", 0, map[string]interface{}{
-			"streak":      gam.CurrentStreak,
+			"streak":       gam.CurrentStreak,
 			"gems_awarded": gems,
 		})
 	}
@@ -122,9 +126,12 @@ func (s *Service) UpdateDailyGoal(userID int64, questionsAnswered int) error {
 	gam.DailyGoalProgress += questionsAnswered
 	nowCompleted := gam.DailyGoalProgress >= gam.DailyGoalTarget
 
-	// Award gems if just completed
+	// Award gems if just completed (atomic — gems is no longer written by the
+	// full-row UpdateGamification below).
 	if !wasCompleted && nowCompleted {
-		gam.Gems += 5
+		if err := s.store.AwardGems(userID, 5); err != nil {
+			log.Printf("[gamification] failed to award daily-goal gems: %v", err)
+		}
 		s.store.LogXPEvent(userID, "daily_goal", 0, map[string]interface{}{
 			"gems_awarded": 5,
 			"target":       gam.DailyGoalTarget,
@@ -149,8 +156,16 @@ func (s *Service) CompleteDrill(userID int64, req models.CompleteDrillRequest) (
 		return nil, fmt.Errorf("get gamification: %w", err)
 	}
 
-	total := len(req.QuestionIDs)
-	correct := len(req.CorrectIDs)
+	// Authoritative correctness comes from the server's answer history, NOT the
+	// client-supplied correct_ids. Trusting the request body let a client post
+	// correct_ids == question_ids for arbitrary IDs to force a "perfect" drill
+	// and mint gems/achievements. The submitted question IDs are used only to
+	// scope which questions this drill covered.
+	total, correct, err := s.store.GetDrillResults(userID, req.QuestionIDs)
+	if err != nil {
+		log.Printf("[gamification] failed to load drill results for user %d: %v", userID, err)
+		return nil, fmt.Errorf("load drill results: %w", err)
+	}
 	isPerfect := correct == total && total > 0
 
 	// The per-question XP was already awarded during SubmitAnswer.
@@ -178,42 +193,40 @@ func (s *Service) CompleteDrill(userID int64, req models.CompleteDrillRequest) (
 			log.Printf("[gamification] failed to add drill XP: %v", err)
 		}
 		s.store.LogXPEvent(userID, "drill_complete", totalDrillXP, map[string]interface{}{
-			"combo_xp":     comboXP,
-			"time_bonus":    timeBonus,
-			"drill_xp":      drillXP,
-			"multiplier":    multiplier,
-			"correct":       correct,
-			"total":         total,
+			"combo_xp":   comboXP,
+			"time_bonus": timeBonus,
+			"drill_xp":   drillXP,
+			"multiplier": multiplier,
+			"correct":    correct,
+			"total":      total,
 		})
 	}
 
-	// Update drill counters
-	gam.DrillsCompletedTotal++
-	if isPerfect {
-		gam.PerfectDrillsTotal++
+	// Update drill counters atomically; the returned total identifies the
+	// first-ever drill. (Previously incremented on the in-memory snapshot and
+	// written via the full-row UpdateGamification, which raced other writers.)
+	drillsCompleted, err := s.store.IncrementDrillCounters(userID, isPerfect)
+	if err != nil {
+		log.Printf("[gamification] failed to increment drill counters for user %d: %v", userID, err)
 	}
 
-	// Gem awards
+	// Gem awards — atomic. The gems column is no longer written by the full-row
+	// update, so every gem change goes through AwardGems.
 	gemsEarned := 0
 	if isPerfect {
 		gemsEarned += 10
 	}
-
-	// First drill bonus
-	if gam.DrillsCompletedTotal == 1 {
-		gemsEarned += 50
+	if drillsCompleted == 1 {
+		gemsEarned += 50 // first drill bonus
 	}
-
 	if gemsEarned > 0 {
-		gam.Gems += gemsEarned
+		if err := s.store.AwardGems(userID, gemsEarned); err != nil {
+			log.Printf("[gamification] failed to award drill gems for user %d: %v", userID, err)
+		}
 	}
 
-	// Refresh totals from DB before achievement check
-	if err := s.store.UpdateGamification(userID, gam); err != nil {
-		log.Printf("[gamification] failed to update gamification: %v", err)
-	}
-
-	// Re-read to get accurate total_xp after AddXP
+	// Re-read to get accurate totals (XP, gems, drill counts) for the
+	// achievement check and the response.
 	gam, _ = s.store.GetOrCreateGamification(userID)
 
 	// Check achievements
@@ -228,11 +241,14 @@ func (s *Service) CompleteDrill(userID int64, req models.CompleteDrillRequest) (
 	var newAchievements []string
 	for _, a := range qualifiedAchievements {
 		if !existingSet[a] {
-			if err := s.store.AwardAchievement(userID, a); err == nil {
+			inserted, err := s.store.AwardAchievement(userID, a)
+			if err == nil && inserted {
 				newAchievements = append(newAchievements, a)
-				// Award gems for achievement
+				// Award gems for the achievement only on first unlock.
 				if def, ok := Achievements[a]; ok {
-					s.store.AwardGems(userID, def.Gems)
+					if err := s.store.AwardGems(userID, def.Gems); err != nil {
+						log.Printf("[gamification] failed to award achievement gems: %v", err)
+					}
 					gemsEarned += def.Gems
 				}
 			}
@@ -245,13 +261,13 @@ func (s *Service) CompleteDrill(userID int64, req models.CompleteDrillRequest) (
 
 	return &models.DrillCompleteResponse{
 		XPBreakdown: models.XPBreakdown{
-			Questions:       0, // Already awarded per-question
-			ComboBonuses:    comboXP,
-			TimeBonus:       timeBonus,
-			DrillCompletion: drillXP,
-			Subtotal:        subtotal,
+			Questions:        0, // Already awarded per-question
+			ComboBonuses:     comboXP,
+			TimeBonus:        timeBonus,
+			DrillCompletion:  drillXP,
+			Subtotal:         subtotal,
 			StreakMultiplier: multiplier,
-			TotalXP:         totalDrillXP,
+			TotalXP:          totalDrillXP,
 		},
 		GemsEarned: gemsEarned,
 		Streak: models.StreakInfo{
@@ -293,21 +309,21 @@ func (s *Service) GetGamification(userID int64) (*models.GamificationResponse, e
 
 	return &models.GamificationResponse{
 		TotalXP:                gam.TotalXP,
-		WeeklyXP:              gam.WeeklyXP,
-		CurrentStreak:         gam.CurrentStreak,
-		LongestStreak:         gam.LongestStreak,
-		StreakFreezeActive:    gam.StreakFreezeActive,
-		StreakFreezesOwned:    gam.StreakFreezesOwned,
-		Gems:                  gam.Gems,
-		DailyGoalTarget:       gam.DailyGoalTarget,
-		DailyGoalProgress:     dailyProgress,
-		LeagueTier:            gam.LeagueTier,
+		WeeklyXP:               gam.WeeklyXP,
+		CurrentStreak:          gam.CurrentStreak,
+		LongestStreak:          gam.LongestStreak,
+		StreakFreezeActive:     gam.StreakFreezeActive,
+		StreakFreezesOwned:     gam.StreakFreezesOwned,
+		Gems:                   gam.Gems,
+		DailyGoalTarget:        gam.DailyGoalTarget,
+		DailyGoalProgress:      dailyProgress,
+		LeagueTier:             gam.LeagueTier,
 		QuestionsAnsweredTotal: gam.QuestionsAnsweredTotal,
 		QuestionsCorrectTotal:  gam.QuestionsCorrectTotal,
 		DrillsCompletedTotal:   gam.DrillsCompletedTotal,
 		PerfectDrillsTotal:     gam.PerfectDrillsTotal,
-		Achievements:          achievements,
-		UnreadNudges:          unreadNudges,
+		Achievements:           achievements,
+		UnreadNudges:           unreadNudges,
 	}, nil
 }
 
@@ -331,7 +347,7 @@ func (s *Service) BuyStreakFreeze(userID int64) (*models.StreakFreezeResponse, e
 	}
 
 	return &models.StreakFreezeResponse{
-		GemsRemaining:    gam.Gems - 50,
+		GemsRemaining:      gam.Gems - 50,
 		StreakFreezesOwned: gam.StreakFreezesOwned + 1,
 	}, nil
 }
@@ -436,13 +452,18 @@ func (s *Service) SendNudge(userID int64, req models.SendNudgeRequest) (int64, e
 		return 0, fmt.Errorf("already nudged this person today")
 	}
 
-	// Check nudge_first achievement
+	// Award the nudge_first achievement's gems ONLY on the first ever nudge.
+	// AwardAchievement now reports whether it actually inserted a row, so the
+	// gems are gated on that — previously they were granted on every nudge,
+	// which was unlimited gem farming.
 	s.store.GetOrCreateGamification(userID)
-	s.store.AwardAchievement(userID, "nudge_first")
-	if def, ok := Achievements["nudge_first"]; ok {
-		// Award gems only if this is the first time (AwardAchievement is idempotent)
-		// We check by trying the insert — if it was a no-op, no gems
-		s.store.AwardGems(userID, def.Gems)
+	inserted, err := s.store.AwardAchievement(userID, "nudge_first")
+	if err == nil && inserted {
+		if def, ok := Achievements["nudge_first"]; ok {
+			if err := s.store.AwardGems(userID, def.Gems); err != nil {
+				log.Printf("[gamification] failed to award nudge_first gems: %v", err)
+			}
+		}
 	}
 
 	return id, nil
