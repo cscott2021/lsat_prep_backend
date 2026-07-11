@@ -986,6 +986,13 @@ func (s *Service) StartGenerationWorker(ctx context.Context) {
 
 	log.Println("[gen-worker] Background generation worker started")
 
+	// Recover any buckets wedged in 'generating' by a previous crash/OOM.
+	if n, err := s.store.RequeueStuckGenerations(); err != nil {
+		log.Printf("[gen-worker] failed to requeue stuck generations: %v", err)
+	} else if n > 0 {
+		log.Printf("[gen-worker] requeued %d stuck 'generating' item(s) from a previous run", n)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -1005,37 +1012,53 @@ func (s *Service) processGenerationQueue(ctx context.Context) {
 	}
 
 	for _, item := range items {
-		s.store.UpdateGenerationStatus(item.ID, "generating", nil)
+		// Process each item under its own recover so a panic in the LLM pipeline
+		// marks that one item failed (freeing the bucket) instead of crashing the
+		// whole process and wedging the queue.
+		s.generateQueueItem(ctx, item)
+	}
+}
 
-		genReq := models.GenerateBatchRequest{
-			Section:    models.Section(item.Section),
-			Difficulty: models.Difficulty(item.TargetDifficulty),
-			Count:      item.QuestionsNeeded,
-		}
-		if item.LRSubtype != nil {
-			sub := models.LRSubtype(*item.LRSubtype)
-			genReq.LRSubtype = &sub
-		}
-		if item.RCSubtype != nil {
-			sub := models.RCSubtype(*item.RCSubtype)
-			genReq.RCSubtype = &sub
-		}
-		if item.SubjectArea != nil {
-			genReq.SubjectArea = *item.SubjectArea
-		}
-		genReq.IsComparative = item.IsComparative
-
-		_, err := s.GenerateBatch(ctx, genReq)
-		if err != nil {
-			errMsg := err.Error()
+func (s *Service) generateQueueItem(ctx context.Context, item models.GenerationQueueItem) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			errMsg := fmt.Sprintf("panic during generation: %v", rec)
 			s.store.UpdateGenerationStatus(item.ID, "failed", &errMsg)
-			log.Printf("[gen-queue] failed: section=%s subtype=%v bucket=%d-%d err=%v",
-				item.Section, item.LRSubtype, item.DifficultyBucketMin, item.DifficultyBucketMax, err)
-		} else {
-			s.store.UpdateGenerationStatus(item.ID, "completed", nil)
-			log.Printf("[gen-queue] completed: section=%s subtype=%v bucket=%d-%d",
-				item.Section, item.LRSubtype, item.DifficultyBucketMin, item.DifficultyBucketMax)
+			log.Printf("[gen-queue] recovered from panic: section=%s bucket=%d-%d: %v",
+				item.Section, item.DifficultyBucketMin, item.DifficultyBucketMax, rec)
 		}
+	}()
+
+	s.store.UpdateGenerationStatus(item.ID, "generating", nil)
+
+	genReq := models.GenerateBatchRequest{
+		Section:    models.Section(item.Section),
+		Difficulty: models.Difficulty(item.TargetDifficulty),
+		Count:      item.QuestionsNeeded,
+	}
+	if item.LRSubtype != nil {
+		sub := models.LRSubtype(*item.LRSubtype)
+		genReq.LRSubtype = &sub
+	}
+	if item.RCSubtype != nil {
+		sub := models.RCSubtype(*item.RCSubtype)
+		genReq.RCSubtype = &sub
+	}
+	if item.SubjectArea != nil {
+		genReq.SubjectArea = *item.SubjectArea
+	}
+	genReq.IsComparative = item.IsComparative
+
+	_, err := s.GenerateBatch(ctx, genReq)
+	if err != nil {
+		errMsg := err.Error()
+		s.store.UpdateGenerationStatus(item.ID, "failed", &errMsg)
+		log.Printf("[gen-queue] failed: section=%s subtype=%v bucket=%d-%d err=%v",
+			item.Section, item.LRSubtype, item.DifficultyBucketMin, item.DifficultyBucketMax, err)
+	} else {
+		s.store.UpdateGenerationStatus(item.ID, "completed", nil)
+		log.Printf("[gen-queue] completed: section=%s subtype=%v bucket=%d-%d",
+			item.Section, item.LRSubtype, item.DifficultyBucketMin, item.DifficultyBucketMax)
 	}
 }
 

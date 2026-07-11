@@ -873,6 +873,20 @@ func (s *Store) UpsertGenerationQueue(section string, subtype *string, minDiff, 
 	return err
 }
 
+// RequeueStuckGenerations resets any queue items left in the 'generating' state
+// back to 'pending'. On this single-instance deployment an item can only be
+// 'generating' if a previous process died mid-generation (a crash/OOM during the
+// long LLM pipeline) — otherwise that bucket is wedged forever and never
+// regenerates. Called once at worker startup. Returns the number requeued.
+func (s *Store) RequeueStuckGenerations() (int64, error) {
+	res, err := s.db.Exec(`UPDATE generation_queue SET status = 'pending' WHERE status = 'generating'`)
+	if err != nil {
+		return 0, fmt.Errorf("requeue stuck generations: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 func (s *Store) GetPendingGenerations(limit int) ([]models.GenerationQueueItem, error) {
 	rows, err := s.db.Query(
 		`SELECT id, section, lr_subtype, rc_subtype,
