@@ -48,6 +48,18 @@ func ParseResponse(responseBody string) (*GeneratedBatch, error) {
 
 	var batch GeneratedBatch
 	if err := json.Unmarshal([]byte(cleaned), &batch); err != nil {
+		// The model sometimes wraps the JSON in prose ("Here are the questions:")
+		// or trailing commentary, which fails a strict Unmarshal of the whole
+		// string and previously discarded the entire (paid-for) batch. Fall back
+		// to extracting the outermost JSON object and parsing that.
+		if obj := extractJSONObject(cleaned); obj != "" {
+			if err2 := json.Unmarshal([]byte(obj), &batch); err2 == nil {
+				if verr := validateBatch(&batch); verr != nil {
+					return nil, verr
+				}
+				return &batch, nil
+			}
+		}
 		return nil, fmt.Errorf("failed to parse JSON response: %w", err)
 	}
 
@@ -56,6 +68,18 @@ func ParseResponse(responseBody string) (*GeneratedBatch, error) {
 	}
 
 	return &batch, nil
+}
+
+// extractJSONObject returns the substring from the first '{' to the last '}',
+// which recovers the JSON object when the model emits leading/trailing prose
+// around it. Returns "" when no plausible object is present.
+func extractJSONObject(s string) string {
+	start := strings.Index(s, "{")
+	end := strings.LastIndex(s, "}")
+	if start == -1 || end == -1 || end <= start {
+		return ""
+	}
+	return s[start : end+1]
 }
 
 func stripCodeFences(s string) string {

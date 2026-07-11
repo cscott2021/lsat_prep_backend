@@ -316,6 +316,22 @@ func TestParseResponse_RCPassageBatch(t *testing.T) {
 	}
 }
 
+func TestParseResponse_PreambleAndPostamble(t *testing.T) {
+	// Models sometimes wrap the JSON in prose ("Here are the questions:"). This
+	// used to fail json.Unmarshal for the whole (paid-for) batch; the
+	// extractJSONObject fallback must recover it.
+	inner := validBatchJSON(4)
+	wrapped := "Sure! Here are the questions you requested:\n\n" + inner + "\n\nLet me know if you need more."
+
+	batch, err := ParseResponse(wrapped)
+	if err != nil {
+		t.Fatalf("expected preamble/postamble to be tolerated, got: %v", err)
+	}
+	if len(batch.Questions) != 4 {
+		t.Errorf("expected 4 questions, got %d", len(batch.Questions))
+	}
+}
+
 // isValidationError checks if err is a *ValidationError via type assertion
 func isValidationError(err error, target **ValidationError) bool {
 	ve, ok := err.(*ValidationError)

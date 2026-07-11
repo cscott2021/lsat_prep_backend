@@ -3,6 +3,7 @@ package gamification
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,6 +11,11 @@ import (
 	"github.com/lib/pq"
 	"github.com/lsat-prep/backend/internal/models"
 )
+
+// ErrAlreadyNudgedToday is returned by SendNudge when the sender has already
+// nudged the same receiver during the current UTC day. Callers surface this as
+// a 429 rate-limit response.
+var ErrAlreadyNudgedToday = errors.New("already nudged this person today")
 
 // GetDrillResults returns, among the given question IDs, how many this user has
 // actually answered (total) and how many correctly (correct), read from the
@@ -600,6 +606,24 @@ func (s *Store) AreFriends(userID, otherID int64) (bool, error) {
 // ── Nudges ──────────────────────────────────────────────
 
 func (s *Store) SendNudge(senderID, receiverID int64, nudgeType, message string) (int64, error) {
+	// Enforce one nudge per sender→receiver per UTC day. There is no DB unique
+	// constraint, so this app-level check is what actually rate-limits nudges
+	// (previously the "already nudged today" branch was dead: a plain INSERT
+	// never conflicted, so a client could spam nudges). Sufficient on a single
+	// instance; a partial unique index would be needed if scaled out.
+	var existing int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM nudges
+		 WHERE sender_id = $1 AND receiver_id = $2
+		   AND (created_at AT TIME ZONE 'UTC')::date = (NOW() AT TIME ZONE 'UTC')::date`,
+		senderID, receiverID,
+	).Scan(&existing); err != nil {
+		return 0, fmt.Errorf("check nudge rate limit: %w", err)
+	}
+	if existing > 0 {
+		return 0, ErrAlreadyNudgedToday
+	}
+
 	var msgPtr *string
 	if message != "" {
 		msgPtr = &message

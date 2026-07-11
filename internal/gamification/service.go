@@ -2,6 +2,7 @@ package gamification
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -449,7 +450,12 @@ func (s *Service) SendNudge(userID int64, req models.SendNudgeRequest) (int64, e
 
 	id, err := s.store.SendNudge(userID, req.ReceiverID, req.NudgeType, req.Message)
 	if err != nil {
-		return 0, fmt.Errorf("already nudged this person today")
+		// Only the genuine rate-limit case maps to "already nudged" (→ 429).
+		// Other DB errors were previously mislabeled as rate-limit.
+		if errors.Is(err, ErrAlreadyNudgedToday) {
+			return 0, fmt.Errorf("already nudged this person today")
+		}
+		return 0, fmt.Errorf("failed to send nudge")
 	}
 
 	// Award the nudge_first achievement's gems ONLY on the first ever nudge.
@@ -571,6 +577,18 @@ func (s *Service) GetFriendsLeaderboard(userID int64) (*models.LeaderboardRespon
 
 // ── Background Workers ──────────────────────────────────
 
+// runSafely invokes fn under a recover so a panic in a background maintenance
+// job (weekly reset / daily streak check) is logged and contained instead of
+// crashing the whole server process, which has no other supervisor.
+func runSafely(name string, fn func()) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[gamification] %s panicked (recovered): %v", name, rec)
+		}
+	}()
+	fn()
+}
+
 func (s *Service) StartWeeklyResetWorker(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
@@ -587,7 +605,7 @@ func (s *Service) StartWeeklyResetWorker(ctx context.Context) {
 			// Run at Monday 00:xx UTC
 			if utc.Weekday() == time.Monday && utc.Hour() == 0 {
 				log.Println("[gamification] Running weekly leaderboard reset")
-				s.runWeeklyReset()
+				runSafely("weekly reset", s.runWeeklyReset)
 			}
 		}
 	}
@@ -666,7 +684,7 @@ func (s *Service) StartDailyStreakWorker(ctx context.Context) {
 			// Run at midnight UTC
 			if utc.Hour() == 0 {
 				log.Println("[gamification] Running daily streak check")
-				s.runDailyStreakCheck()
+				runSafely("daily streak check", s.runDailyStreakCheck)
 			}
 		}
 	}
