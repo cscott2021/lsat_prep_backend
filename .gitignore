@@ -1,1 +1,11 @@
+# Secrets / local env
 .env
+.env.*
+
+# Compiled binaries and build output
+/server
+/bin/
+*.exe
+
+# OS / editor cruft
+.DS_Store

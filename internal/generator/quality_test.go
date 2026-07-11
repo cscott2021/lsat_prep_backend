@@ -9,7 +9,7 @@ func TestComputeQualityScore_AllPerfect(t *testing.T) {
 	vr := &ValidationResult{Confidence: "high", Matches: true}
 	ar := &AdversarialResult{Challenges: nil} // no challenges = clean
 	structural := StructuralScore{
-		StimulusLengthOK:      true,
+		StimulusLengthOK:       true,
 		AllChoicesInRange:      true,
 		AllExplanationsPresent: true,
 		CorrectAnswerDistribOK: true,
@@ -26,7 +26,7 @@ func TestComputeQualityScore_LowVerification(t *testing.T) {
 	vr := &ValidationResult{Confidence: "low", Matches: true}
 	ar := &AdversarialResult{} // clean
 	structural := StructuralScore{
-		StimulusLengthOK:      true,
+		StimulusLengthOK:       true,
 		AllChoicesInRange:      true,
 		AllExplanationsPresent: true,
 		CorrectAnswerDistribOK: true,
@@ -47,7 +47,7 @@ func TestComputeQualityScore_StrongAdversarial(t *testing.T) {
 		},
 	}
 	structural := StructuralScore{
-		StimulusLengthOK:      true,
+		StimulusLengthOK:       true,
 		AllChoicesInRange:      true,
 		AllExplanationsPresent: true,
 		CorrectAnswerDistribOK: true,
@@ -64,7 +64,7 @@ func TestComputeQualityScore_PartialStructural(t *testing.T) {
 	vr := &ValidationResult{Confidence: "medium", Matches: true}
 	ar := &AdversarialResult{} // clean
 	structural := StructuralScore{
-		StimulusLengthOK:      true,
+		StimulusLengthOK:       true,
 		AllChoicesInRange:      false,
 		AllExplanationsPresent: true,
 		CorrectAnswerDistribOK: false,
@@ -79,7 +79,7 @@ func TestComputeQualityScore_PartialStructural(t *testing.T) {
 
 func TestComputeQualityScore_NilInputs(t *testing.T) {
 	structural := StructuralScore{
-		StimulusLengthOK:      true,
+		StimulusLengthOK:       true,
 		AllChoicesInRange:      true,
 		AllExplanationsPresent: true,
 		CorrectAnswerDistribOK: true,

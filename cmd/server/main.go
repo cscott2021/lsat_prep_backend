@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/gorilla/mux"
@@ -19,6 +20,26 @@ import (
 	"github.com/rs/cors"
 )
 
+// maxRequestBody caps the size of any request body the server will read. It
+// guards against memory-exhaustion from an oversized JSON payload while staying
+// generous enough for the admin question-bank import.
+const maxRequestBody = 10 << 20 // 10 MiB
+
+// limitRequestBody wraps every request body in a MaxBytesReader so handlers that
+// decode JSON fail with an error (surfaced as 400) instead of buffering
+// unbounded input.
+func limitRequestBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The admin import endpoint applies its own, larger limit; wrapping it
+		// here too would cap it at the smaller global limit (the inner reader
+		// reads through this outer one).
+		if r.Body != nil && !strings.HasSuffix(r.URL.Path, "/admin/import") {
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	// Initialize database
 	db, err := database.Connect()
@@ -29,6 +50,11 @@ func main() {
 
 	if err := database.RunMigrations(db); err != nil {
 		log.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	// Load the JWT signing secret from the environment; fail fast if missing.
+	if err := auth.InitJWTSecret(); err != nil {
+		log.Fatalf("Failed to initialize auth: %v", err)
 	}
 
 	// Initialize handlers
@@ -111,13 +137,17 @@ func main() {
 	protected.HandleFunc("/nudges", gamHandler.SendNudge).Methods("POST")
 	protected.HandleFunc("/nudges/{id}/read", gamHandler.MarkNudgeRead).Methods("POST")
 
-	// Admin endpoints
-	protected.HandleFunc("/admin/quality-stats", questionHandler.GetQualityStats).Methods("GET")
-	protected.HandleFunc("/admin/generation-stats", questionHandler.GetGenerationStats).Methods("GET")
-	protected.HandleFunc("/admin/recalibrate", questionHandler.Recalibrate).Methods("POST")
-	protected.HandleFunc("/admin/flagged", questionHandler.GetFlaggedQuestions).Methods("GET")
-	protected.HandleFunc("/admin/export", questionHandler.ExportQuestions).Methods("GET")
-	protected.HandleFunc("/admin/import", questionHandler.ImportQuestions).Methods("POST")
+	// Admin endpoints — gated by AdminMiddleware (is_admin) on top of auth.
+	// These expose the full question bank (export/import) and calibration, so
+	// they must never be reachable by an ordinary authenticated user.
+	admin := protected.PathPrefix("/admin").Subrouter()
+	admin.Use(middleware.AdminMiddleware(db))
+	admin.HandleFunc("/quality-stats", questionHandler.GetQualityStats).Methods("GET")
+	admin.HandleFunc("/generation-stats", questionHandler.GetGenerationStats).Methods("GET")
+	admin.HandleFunc("/recalibrate", questionHandler.Recalibrate).Methods("POST")
+	admin.HandleFunc("/flagged", questionHandler.GetFlaggedQuestions).Methods("GET")
+	admin.HandleFunc("/export", questionHandler.ExportQuestions).Methods("GET")
+	admin.HandleFunc("/import", questionHandler.ImportQuestions).Methods("POST")
 
 	// History & bookmarks
 	questionHandler.RegisterHistoryRoutes(protected)
@@ -133,15 +163,18 @@ func main() {
 		w.Write([]byte(`{"status":"ok"}`))
 	}).Methods("GET")
 
-	// CORS
+	// CORS. Auth is via a Bearer token in the Authorization header (not cookies),
+	// so credentialed CORS is unnecessary — and a wildcard origin combined with
+	// AllowCredentials:true is an invalid combination that browsers reject.
+	// PATCH is included so web clients can call the dismiss/undismiss routes.
 	c := cors.New(cors.Options{
 		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Authorization", "Content-Type"},
-		AllowCredentials: true,
+		AllowCredentials: false,
 	})
 
-	handler := c.Handler(r)
+	handler := c.Handler(limitRequestBody(r))
 
 	port := os.Getenv("PORT")
 	if port == "" {

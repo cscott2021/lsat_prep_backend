@@ -377,24 +377,32 @@ func (s *Service) SubmitAnswer(userID int64, questionID int64, selectedChoiceID 
 		s.store.IncrementCorrect(questionID)
 	}
 
-	// Record user history (with selected answer and time)
-	if err := s.store.RecordAnswer(userID, questionID, isCorrect, &selectedChoiceID, timeSpentSeconds); err != nil {
-		log.Printf("WARN: failed to record answer history: %v", err)
-	}
-
-	// Update ability scores
-	var abilitySnapshot *models.AbilitySnapshot
-	snapshot, err := s.UpdateAbilityScores(userID, question, isCorrect)
+	// Record user history (with selected answer and time). firstAttempt gates
+	// all scoring side-effects so re-answering a question (the correct choice is
+	// revealed after the first submit) cannot farm XP / inflate the leaderboard.
+	firstAttempt, err := s.store.RecordAnswer(userID, questionID, isCorrect, &selectedChoiceID, timeSpentSeconds)
 	if err != nil {
-		log.Printf("WARN: failed to update ability scores: %v", err)
-	} else {
-		abilitySnapshot = snapshot
+		// On a record failure we treat it as not-first so we never award twice;
+		// a genuine first attempt will be re-recorded and scored on retry.
+		log.Printf("WARN: failed to record answer history: %v", err)
+		firstAttempt = false
 	}
 
-	// Gamification: award XP, update daily goal, streak, counters
-	// Skip if source is "similar_drill"
+	// Update ability scores — only on the first attempt at this question.
+	var abilitySnapshot *models.AbilitySnapshot
+	if firstAttempt {
+		snapshot, err := s.UpdateAbilityScores(userID, question, isCorrect)
+		if err != nil {
+			log.Printf("WARN: failed to update ability scores: %v", err)
+		} else {
+			abilitySnapshot = snapshot
+		}
+	}
+
+	// Gamification: award XP, update daily goal, streak, counters — only on the
+	// first attempt, and never for "similar_drill" practice.
 	var xpAwarded int
-	if s.gamService != nil && source != "similar_drill" {
+	if s.gamService != nil && source != "similar_drill" && firstAttempt {
 		if isCorrect && abilitySnapshot != nil {
 			xpAwarded = s.gamService.AwardQuestionXP(userID, question.DifficultyScore, abilitySnapshot.SubtypeAbility)
 		}
@@ -863,6 +871,20 @@ func mapScoreToDifficulty(score int) models.Difficulty {
 	return models.DifficultyHard
 }
 
+// difficultyBandMidpoint returns a representative difficulty_score at the middle
+// of the band for a difficulty label. Each value maps back to the same label via
+// mapScoreToDifficulty (bands: easy<=35, medium<=65, hard>65).
+func difficultyBandMidpoint(difficulty string) int {
+	switch models.Difficulty(difficulty) {
+	case models.DifficultyEasy:
+		return 22
+	case models.DifficultyHard:
+		return 82
+	default:
+		return 50
+	}
+}
+
 // ── Generation Queue ────────────────────────────────────
 
 func (s *Service) CheckAndQueueGeneration(section string, subtype *string, minDiff, maxDiff int) {
@@ -1057,7 +1079,10 @@ func (s *Service) RecalibrateDifficulty() (*models.RecalibrationReport, error) {
 
 	recalibrated := 0
 	for _, c := range candidates {
-		err := s.store.UpdateQuestionDifficulty(c.QuestionID, c.SuggestedDifficulty)
+		// Move difficulty_score to the middle of the suggested band so adaptive
+		// serving (which filters on difficulty_score) actually reflects the new
+		// difficulty. mapScoreToDifficulty uses bands easy<=35, medium<=65, hard.
+		err := s.store.UpdateQuestionDifficulty(c.QuestionID, c.SuggestedDifficulty, difficultyBandMidpoint(c.SuggestedDifficulty))
 		if err != nil {
 			log.Printf("WARN: failed to recalibrate question %d: %v", c.QuestionID, err)
 			continue

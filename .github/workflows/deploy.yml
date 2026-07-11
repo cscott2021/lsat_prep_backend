@@ -18,6 +18,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Gate the deploy on the code actually vetting, building and passing tests.
+      - name: Verify
+        run: |
+          go vet ./...
+          go build ./...
+          go test ./...
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -39,17 +51,15 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      - name: Download current task definition
-        run: |
-          aws ecs describe-task-definition \
-            --task-definition $TASK_DEFINITION \
-            --query taskDefinition > task-definition.json
-
-      - name: Update task definition with new image
+      # Render from the version-controlled task definition (source of truth),
+      # not the live one. Downloading the live def and swapping only the image
+      # meant changes to secrets/env in ecs-task-def.json (e.g. JWT_SECRET) were
+      # never actually applied on deploy.
+      - name: Render task definition with new image
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
-          task-definition: task-definition.json
+          task-definition: ecs-task-def.json
           container-name: lsat-backend
           image: ${{ steps.build-image.outputs.image }}
 

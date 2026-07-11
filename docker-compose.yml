@@ -26,6 +26,9 @@ services:
       DB_USER: lsat_user
       DB_PASSWORD: lsat_password
       DB_NAME: lsat_prep
+      DB_SSLMODE: disable
+      # Local dev signing key only — production loads JWT_SECRET from SSM.
+      JWT_SECRET: ${JWT_SECRET:-local-dev-insecure-jwt-secret-change-me-32b}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       ANTHROPIC_MODEL: claude-opus-4-5-20251101
       ANTHROPIC_VALIDATION_MODEL: claude-sonnet-4-5-20250929

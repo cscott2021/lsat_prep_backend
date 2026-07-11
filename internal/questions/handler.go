@@ -56,14 +56,18 @@ func (h *Handler) GenerateBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Default count
+	// Default and clamp count
 	if req.Count <= 0 {
 		req.Count = 6
+	}
+	if req.Count > 20 {
+		req.Count = 20
 	}
 
 	resp, err := h.service.GenerateBatch(r.Context(), req)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "Generation failed: " + err.Error()})
+		log.Printf("[handler] GenerateBatch error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "Generation failed"})
 		return
 	}
 
@@ -79,7 +83,7 @@ func (h *Handler) ListBatches(w http.ResponseWriter, r *http.Request) {
 		status = &bs
 	}
 
-	limit := intQueryParam(query, "limit", 20)
+	limit := limitQueryParam(query, "limit", 20, 100)
 	offset := intQueryParam(query, "offset", 0)
 
 	batches, err := h.service.ListBatches(status, limit, offset)
@@ -238,9 +242,12 @@ func (h *Handler) QuickDrill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Default count
+	// Default and clamp count
 	if req.Count <= 0 {
 		req.Count = 6
+	}
+	if req.Count > 50 {
+		req.Count = 50
 	}
 
 	questions, err := h.service.GetQuickDrill(r.Context(), userID, req)
@@ -298,9 +305,12 @@ func (h *Handler) SubtypeDrill(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Default count
+	// Default and clamp count
 	if req.Count <= 0 {
 		req.Count = 6
+	}
+	if req.Count > 50 {
+		req.Count = 50
 	}
 
 	questions, err := h.service.GetSubtypeDrill(r.Context(), userID, req)
@@ -341,7 +351,8 @@ func (h *Handler) GetGenerationStats(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Recalibrate(w http.ResponseWriter, r *http.Request) {
 	report, err := h.service.RecalibrateDifficulty()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "Recalibration failed: " + err.Error()})
+		log.Printf("[handler] Recalibrate error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "Recalibration failed"})
 		return
 	}
 	writeJSON(w, http.StatusOK, report)
@@ -349,7 +360,7 @@ func (h *Handler) Recalibrate(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) GetFlaggedQuestions(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
-	limit := intQueryParam(query, "limit", 20)
+	limit := limitQueryParam(query, "limit", 20, 100)
 	offset := intQueryParam(query, "offset", 0)
 
 	questions, total, err := h.service.GetFlaggedQuestions(limit, offset)
@@ -373,7 +384,8 @@ func (h *Handler) GetFlaggedQuestions(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ExportQuestions(w http.ResponseWriter, r *http.Request) {
 	envelope, err := h.service.ExportQuestions()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "Export failed: " + err.Error()})
+		log.Printf("[handler] ExportQuestions error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "Export failed"})
 		return
 	}
 	writeJSON(w, http.StatusOK, envelope)
@@ -384,7 +396,7 @@ func (h *Handler) ImportQuestions(w http.ResponseWriter, r *http.Request) {
 
 	var envelope models.ExportEnvelope
 	if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil {
-		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "Invalid request body: " + err.Error()})
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "Invalid request body"})
 		return
 	}
 
@@ -395,7 +407,8 @@ func (h *Handler) ImportQuestions(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.service.ImportQuestions(r.Context(), envelope)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "Import failed: " + err.Error()})
+		log.Printf("[handler] ImportQuestions error: %v", err)
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "Import failed"})
 		return
 	}
 
@@ -425,6 +438,9 @@ func (h *Handler) RCDrill(w http.ResponseWriter, r *http.Request) {
 
 	if req.Count <= 0 {
 		req.Count = 8
+	}
+	if req.Count > 50 {
+		req.Count = 50
 	}
 
 	resp, err := h.service.GetRCDrill(r.Context(), userID, req)
@@ -523,6 +539,25 @@ func intQueryParam(query url.Values, key string, defaultVal int) int {
 	v, err := strconv.Atoi(s)
 	if err != nil || v < 0 {
 		return defaultVal
+	}
+	return v
+}
+
+// limitQueryParam parses a page-size limit, clamping to [1, maxLimit] and
+// falling back to defaultVal when absent/invalid. Enforcing a minimum of 1
+// prevents a divide-by-zero in offset/limit pagination math, and the ceiling
+// prevents an unbounded result set / full-table scan from a large client value.
+func limitQueryParam(query url.Values, key string, defaultVal, maxLimit int) int {
+	s := query.Get(key)
+	if s == "" {
+		return defaultVal
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil || v < 1 {
+		return defaultVal
+	}
+	if v > maxLimit {
+		return maxLimit
 	}
 	return v
 }

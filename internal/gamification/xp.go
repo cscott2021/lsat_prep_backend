@@ -97,8 +97,16 @@ func DrillCompletionXP(correct, total int) int {
 	return 0
 }
 
+// maxCombo bounds the combo loop. A drill cannot realistically exceed this, and
+// the cap prevents a client-supplied combo_max (which is unvalidated in the
+// request body) from driving an unbounded O(n) loop as a CPU-exhaustion vector.
+const maxCombo = 1000
+
 // CalculateComboXPTotal computes total combo XP from the max combo streak in a drill.
 func CalculateComboXPTotal(comboMax int) int {
+	if comboMax > maxCombo {
+		comboMax = maxCombo
+	}
 	total := 0
 	for i := 3; i <= comboMax; i++ {
 		total += ComboXP(i)
