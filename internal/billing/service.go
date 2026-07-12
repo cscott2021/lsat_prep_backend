@@ -62,6 +62,7 @@ func (s *Service) BuildConfigResponse() (*models.BillingConfigResponse, error) {
 		id, name, priceID string
 	}{
 		{"monthly", "Monthly", s.cfg.PriceMonthly},
+		{"quarterly", "Quarterly", s.cfg.PriceQuarterly},
 		{"annual", "Annual", s.cfg.PriceAnnual},
 	}
 	for _, pl := range plans {
@@ -76,6 +77,7 @@ func (s *Service) BuildConfigResponse() (*models.BillingConfigResponse, error) {
 			bp.Currency = string(pr.Currency)
 			if pr.Recurring != nil {
 				bp.Interval = string(pr.Recurring.Interval)
+				bp.IntervalCount = pr.Recurring.IntervalCount
 			}
 		}
 		resp.Plans = append(resp.Plans, bp)
@@ -115,6 +117,14 @@ func (s *Service) GetSubscriptionResponse(userID int64) (*models.SubscriptionRes
 	return resp, nil
 }
 
+// isConfiguredPrice reports whether priceID matches one of our configured plan
+// prices (monthly / quarterly / annual). Empty configured ids never match.
+func (s *Service) isConfiguredPrice(priceID string) bool {
+	return (s.cfg.PriceMonthly != "" && priceID == s.cfg.PriceMonthly) ||
+		(s.cfg.PriceQuarterly != "" && priceID == s.cfg.PriceQuarterly) ||
+		(s.cfg.PriceAnnual != "" && priceID == s.cfg.PriceAnnual)
+}
+
 // Subscribe creates (or reuses) the Stripe customer and starts an incomplete
 // subscription, returning the PaymentIntent client secret for the Payment Sheet.
 func (s *Service) Subscribe(userID int64, req models.SubscribeRequest) (*models.SubscribeResponse, error) {
@@ -123,6 +133,22 @@ func (s *Service) Subscribe(userID int64, req models.SubscribeRequest) (*models.
 	}
 	if req.PriceID == "" {
 		return nil, errors.New("price_id is required")
+	}
+	// Allowlist: only our configured plan prices may be purchased. Without this a
+	// client could pass any active/archived/foreign Stripe price id and still get
+	// full entitlement (which is derived from status alone) at the wrong price.
+	if !s.isConfiguredPrice(req.PriceID) {
+		return nil, errors.New("unknown price_id")
+	}
+	// Guard against duplicate subscriptions: if the user already has a live sub,
+	// refuse to create a second one — Stripe would bill both and Cancel only
+	// reaches the latest stripe_subscription_id.
+	if existing, gerr := s.store.GetByUserID(userID); gerr == nil && existing != nil &&
+		existing.StripeSubscriptionID != "" {
+		switch existing.Status {
+		case "trialing", "active", "past_due":
+			return nil, errors.New("you already have an active subscription")
+		}
 	}
 
 	customerID, err := s.ensureCustomer(userID)
@@ -297,16 +323,33 @@ func (s *Service) HandleWebhook(payload []byte, signature string) error {
 		return fmt.Errorf("webhook signature verification failed: %w", err)
 	}
 
-	// Idempotency: record the event id first; skip if already seen.
-	fresh, err := s.store.MarkEventProcessed(event.ID, string(event.Type))
+	// Idempotency: skip events we've already fully processed.
+	processed, err := s.store.EventProcessed(event.ID)
 	if err != nil {
-		return fmt.Errorf("record billing event: %w", err)
+		return fmt.Errorf("check billing event: %w", err)
 	}
-	if !fresh {
+	if processed {
 		log.Printf("[billing] duplicate webhook event %s (%s) ignored", event.ID, event.Type)
 		return nil
 	}
 
+	// Dispatch FIRST. On a transient failure we return the error WITHOUT recording
+	// the event id, so Stripe re-delivers and we retry; the apply funcs are
+	// idempotent (upserts keyed by user_id), so a re-handle is safe.
+	if derr := s.dispatchEvent(event); derr != nil {
+		return derr
+	}
+
+	// Record only after successful handling. A failure to record here is benign:
+	// a retry would re-handle the event idempotently.
+	if _, merr := s.store.MarkEventProcessed(event.ID, string(event.Type)); merr != nil {
+		log.Printf("[billing] event %s handled but not recorded (safe to re-handle on retry): %v", event.ID, merr)
+	}
+	return nil
+}
+
+// dispatchEvent routes a verified Stripe event to the appropriate handler.
+func (s *Service) dispatchEvent(event stripe.Event) error {
 	switch event.Type {
 	case "customer.subscription.created",
 		"customer.subscription.updated",

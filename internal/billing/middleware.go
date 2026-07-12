@@ -37,10 +37,11 @@ func RequireEntitlement(svc *Service) func(http.Handler) http.Handler {
 
 			ent, err := svc.GetEntitlement(userID)
 			if err != nil {
-				// Do not hard-fail the request path on a transient DB error here;
-				// log and deny with the generic paywall response.
+				// Transient infra error (e.g. an RDS failover): fail with a
+				// retryable 503 rather than 402, so active subscribers aren't
+				// thrown to the paywall mid-session for a backend hiccup.
 				log.Printf("[billing] entitlement check failed for user %d: %v", userID, err)
-				writeJSON(w, http.StatusPaymentRequired, models.ErrorResponse{Error: "subscription_required"})
+				writeJSON(w, http.StatusServiceUnavailable, models.ErrorResponse{Error: "billing temporarily unavailable"})
 				return
 			}
 

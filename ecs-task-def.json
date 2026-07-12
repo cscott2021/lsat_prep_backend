@@ -32,7 +32,9 @@
         { "name": "DIFFICULTY_WINDOW_MAX", "value": "35" },
         { "name": "MIN_BUCKET_INVENTORY", "value": "6" },
         { "name": "GENERATION_QUEUE_INTERVAL", "value": "30" },
-        { "name": "GENERATION_QUEUE_BATCH_SIZE", "value": "5" }
+        { "name": "GENERATION_QUEUE_BATCH_SIZE", "value": "5" },
+        { "name": "APP_BASE_URL", "value": "https://app.scoreright.app" },
+        { "name": "TRIAL_DAYS", "value": "0" }
       ],
       "secrets": [
         {

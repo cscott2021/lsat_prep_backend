@@ -58,8 +58,12 @@ type BillingPlan struct {
 	Name     string `json:"name"`     // display name
 	PriceID  string `json:"price_id"` // Stripe price id
 	Interval string `json:"interval"` // "month" | "year"
-	Amount   int64  `json:"amount"`   // smallest currency unit (e.g. cents)
-	Currency string `json:"currency"` // ISO currency, lowercased (Stripe convention)
+	// IntervalCount is the number of intervals per billing cycle (e.g. 3 for a
+	// quarterly plan billed every 3 months). Lets the client render the correct
+	// cadence ("/quarter") instead of assuming "/mo".
+	IntervalCount int64  `json:"interval_count"`
+	Amount        int64  `json:"amount"`   // smallest currency unit (e.g. cents)
+	Currency      string `json:"currency"` // ISO currency, lowercased (Stripe convention)
 }
 
 // BillingConfigResponse is returned by GET /billing/config so the client can

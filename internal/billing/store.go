@@ -127,7 +127,8 @@ func (s *Store) UpsertFromStripe(sub *models.Subscription) error {
 		    current_period_end     = EXCLUDED.current_period_end,
 		    cancel_at_period_end   = EXCLUDED.cancel_at_period_end,
 		    trial_end              = EXCLUDED.trial_end,
-		    updated_at             = NOW()`,
+		    updated_at             = NOW()
+		 WHERE subscriptions.provider <> 'comp'`,
 		sub.UserID, nullStr(sub.StripeCustomerID), nullStr(sub.StripeSubscriptionID),
 		sub.Status, sub.Plan, sub.PriceID, sub.CurrentPeriodEnd, sub.CancelAtPeriodEnd, sub.TrialEnd,
 	)
@@ -186,6 +187,19 @@ func (s *Store) MarkEventProcessed(eventID, eventType string) (bool, error) {
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+// EventProcessed reports whether a Stripe event id has already been recorded as
+// fully processed. Used for webhook idempotency BEFORE dispatching handlers, so a
+// handler that fails transiently is retried (rather than being marked processed
+// up front and then permanently skipped).
+func (s *Store) EventProcessed(eventID string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM billing_events WHERE stripe_event_id = $1)`,
+		eventID,
+	).Scan(&exists)
+	return exists, err
 }
 
 // nullStr converts an empty string to a SQL NULL so the partial unique indexes on

@@ -38,6 +38,8 @@ func (p *stripeProvider) planForPrice(priceID string) string {
 	switch priceID {
 	case p.cfg.PriceMonthly:
 		return "monthly"
+	case p.cfg.PriceQuarterly:
+		return "quarterly"
 	case p.cfg.PriceAnnual:
 		return "annual"
 	default:
@@ -190,14 +192,14 @@ func (p *stripeProvider) CreateOffer(req models.CreateCouponRequest) (*models.Cr
 		couponParams.PercentOff = stripe.Float64(float64(req.Value))
 		couponParams.Duration = stripe.String(string(stripe.CouponDurationForever))
 	case "free_days":
-		if req.Value <= 0 {
-			return nil, errors.New("free_days value must be positive")
-		}
-		// 100%-off, applied once, tagged with the free-day count in metadata.
-		couponParams.PercentOff = stripe.Float64(100)
-		couponParams.Duration = stripe.String(string(stripe.CouponDurationOnce))
-		couponParams.AddMetadata("free_days", int64ToStr(req.Value))
-		couponParams.AddMetadata("offer_type", "free_days")
+		// Deferred for launch. Modeling "N free days" as a 100%-off duration=once
+		// coupon waives the ENTIRE first billing period (a "14 free days" code on
+		// the annual plan = a free year), because Stripe coupons cannot express a
+		// day-bounded discount. The correct primitive is a bounded trial
+		// (trial_period_days) set at subscribe time. Until that is wired, reject
+		// creation so an admin cannot accidentally over-grant. For free access,
+		// use an admin comp; for a discount, use a percentage code.
+		return nil, errors.New("free_days offers are temporarily unavailable — use a percentage discount or an admin comp")
 	default:
 		return nil, errors.New("type must be 'percent' or 'free_days'")
 	}

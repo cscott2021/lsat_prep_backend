@@ -21,6 +21,7 @@ type Config struct {
 	WebhookSecret  string
 	PublishableKey string
 	PriceMonthly   string
+	PriceQuarterly string
 	PriceAnnual    string
 	AppBaseURL     string
 	TrialDays      int
@@ -41,16 +42,21 @@ func LoadConfig() Config {
 		WebhookSecret:  os.Getenv("STRIPE_WEBHOOK_SECRET"),
 		PublishableKey: os.Getenv("STRIPE_PUBLISHABLE_KEY"),
 		PriceMonthly:   os.Getenv("STRIPE_PRICE_MONTHLY"),
+		PriceQuarterly: os.Getenv("STRIPE_PRICE_QUARTERLY"),
 		PriceAnnual:    os.Getenv("STRIPE_PRICE_ANNUAL"),
 		AppBaseURL:     os.Getenv("APP_BASE_URL"),
 		TrialDays:      trialDays,
 	}
 }
 
-// Enabled reports whether Stripe billing is configured. When false every
-// Stripe-backed endpoint returns 503 and the paywall is a no-op.
+// Enabled reports whether Stripe billing is fully configured. Both the secret
+// key AND the webhook signing secret are required: taking a card charge without
+// a working webhook would leave every payer stuck 'incomplete' (never
+// reconciled), so we treat a secret-key-without-webhook state as DISABLED (503 +
+// paywall fails open) rather than half-live. When false every Stripe-backed
+// endpoint returns 503 and the paywall is a no-op.
 func (c Config) Enabled() bool {
-	return c.SecretKey != ""
+	return c.SecretKey != "" && c.WebhookSecret != ""
 }
 
 // WebhookConfigured reports whether inbound webhooks can be verified. The webhook

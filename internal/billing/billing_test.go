@@ -26,8 +26,11 @@ func TestConfigEnabledAndWebhook(t *testing.T) {
 	t.Setenv("STRIPE_WEBHOOK_SECRET", "")
 	t.Setenv("TRIAL_DAYS", "14")
 	cfg := LoadConfig()
-	if !cfg.Enabled() {
-		t.Errorf("expected billing enabled with secret key set")
+	// Enabled now requires BOTH the secret key and the webhook secret: charging
+	// cards without a working webhook would leave every payer unreconciled, so a
+	// secret-key-only config is deliberately treated as DISABLED (fail-open).
+	if cfg.Enabled() {
+		t.Errorf("expected billing DISABLED with only the secret key set (no webhook secret)")
 	}
 	if cfg.WebhookConfigured() {
 		t.Errorf("expected webhook not configured without webhook secret")
@@ -38,6 +41,9 @@ func TestConfigEnabledAndWebhook(t *testing.T) {
 
 	t.Setenv("STRIPE_WEBHOOK_SECRET", "whsec_x")
 	cfg = LoadConfig()
+	if !cfg.Enabled() {
+		t.Errorf("expected billing enabled with both secrets set")
+	}
 	if !cfg.WebhookConfigured() {
 		t.Errorf("expected webhook configured with both secrets set")
 	}

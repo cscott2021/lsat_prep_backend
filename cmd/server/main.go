@@ -83,6 +83,12 @@ func main() {
 	// return 503, the paywall fails open, and the server still starts. This lets
 	// nonprod run with no Stripe keys at all.
 	billingCfg := billing.LoadConfig()
+	if billingCfg.SecretKey != "" && billingCfg.WebhookSecret == "" {
+		// Half-configured: a secret key with no webhook secret would charge cards
+		// but never reconcile them (every payer stuck 'incomplete'). Enabled()
+		// treats this as DISABLED; make the misconfig loud so ops notices.
+		log.Println("[billing] WARNING: STRIPE_SECRET_KEY is set but STRIPE_WEBHOOK_SECRET is empty — billing stays DISABLED until both are provided.")
+	}
 	billingStore := billing.NewStore(db)
 	billingService := billing.NewService(billingCfg, billingStore)
 	billingHandler := billing.NewHandler(billingService)
