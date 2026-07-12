@@ -93,12 +93,6 @@ func main() {
 	billingService := billing.NewService(billingCfg, billingStore)
 	billingHandler := billing.NewHandler(billingService)
 
-	// Seed the launch plan prices ($19.99 / $49.99 / $149.99) once Stripe is
-	// live. Idempotent + a no-op when billing is disabled. Non-fatal.
-	if err := billingService.SeedDefaultPrices(); err != nil {
-		log.Printf("[billing] seeding default prices failed (will retry next boot): %v", err)
-	}
-
 	// Start background workers
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -106,6 +100,9 @@ func main() {
 	go gamService.StartWeeklyResetWorker(ctx)
 	go gamService.StartDailyStreakWorker(ctx)
 	go billingService.StartEmailWorker(ctx)
+	// Self-healing price seeder ($19.99 / $49.99 / $149.99) — retries until all
+	// tiers exist so a transient failure can't leave the store unbuyable.
+	go billingService.StartPriceSeeder(ctx)
 
 	// Setup router
 	r := mux.NewRouter()

@@ -1,15 +1,22 @@
 name: Deploy to AWS ECS
 
+# Branch -> environment:
+#   main    -> PRODUCTION (service lsat-backend-prod, ecs-task-def.prod.json,
+#              /lsat-prep/prod/* secrets, DB lsat_prep_prod, Stripe LIVE,
+#              api.scoreright.app)
+#   staging -> STAGING    (service lsat-backend, ecs-task-def.json,
+#              /lsat-prep/staging/* secrets, DB lsat_prep, Stripe SANDBOX,
+#              lsat-api-staging.scottventures.com)
+# Both run in the same ECS cluster (lsat-prep-staging).
+
 on:
   push:
-    branches: [main]
+    branches: [main, staging]
 
 env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: lsat-prep-backend
   ECS_CLUSTER: lsat-prep-staging
-  ECS_SERVICE: lsat-backend
-  TASK_DEFINITION: lsat-prep-backend
 
 jobs:
   deploy:
@@ -23,12 +30,23 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Gate the deploy on the code actually vetting, building and passing tests.
+      # Gate the deploy on the code vetting, building, and passing tests.
       - name: Verify
         run: |
           go vet ./...
           go build ./...
           go test ./...
+
+      - name: Select environment from branch
+        id: env
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "service=lsat-backend-prod" >> "$GITHUB_OUTPUT"
+            echo "taskdef=ecs-task-def.prod.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "service=lsat-backend" >> "$GITHUB_OUTPUT"
+            echo "taskdef=ecs-task-def.json" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -51,15 +69,11 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      # Render from the version-controlled task definition (source of truth),
-      # not the live one. Downloading the live def and swapping only the image
-      # meant changes to secrets/env in ecs-task-def.json (e.g. JWT_SECRET) were
-      # never actually applied on deploy.
       - name: Render task definition with new image
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
-          task-definition: ecs-task-def.json
+          task-definition: ${{ steps.env.outputs.taskdef }}
           container-name: lsat-backend
           image: ${{ steps.build-image.outputs.image }}
 
@@ -67,6 +81,6 @@ jobs:
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
           task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: ${{ env.ECS_SERVICE }}
+          service: ${{ steps.env.outputs.service }}
           cluster: ${{ env.ECS_CLUSTER }}
           wait-for-service-stability: true

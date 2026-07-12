@@ -1,6 +1,7 @@
 package billing
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -85,6 +86,33 @@ func (s *Service) SeedDefaultPrices() error {
 	return nil
 }
 
+// StartPriceSeeder ensures the plan prices exist, retrying in the background
+// with backoff until every tier is seeded. This self-heals a transient Stripe/DB
+// failure on the first billing-enabled boot instead of leaving the store
+// unbuyable (empty /billing/config, all subscribes rejected) until a manual
+// reboot. No-op when billing is disabled.
+func (s *Service) StartPriceSeeder(ctx context.Context) {
+	if !s.Enabled() {
+		return
+	}
+	backoff := 5 * time.Second
+	for {
+		if err := s.SeedDefaultPrices(); err != nil {
+			log.Printf("[billing] price seed attempt failed (retrying in %s): %v", backoff, err)
+		} else if prices, perr := s.store.GetPlanPrices(); perr == nil && len(prices) >= len(tierOrder) {
+			return // all tiers present
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if backoff < 60*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
 // AdminPricing returns the current prices + change history for the admin UI.
 func (s *Service) AdminPricing() (*models.AdminPricingResponse, error) {
 	prices, err := s.store.GetPlanPrices()
@@ -113,6 +141,12 @@ func (s *Service) UpdatePrice(adminID int64, tier string, req models.UpdatePrice
 	}
 	if req.Amount < 50 {
 		return nil, errors.New("amount must be at least $0.50")
+	}
+	if req.Amount > 100000 {
+		// Guardrail against a fat-finger (e.g. cents typed as dollars): launch
+		// prices top out at $149.99, so $1,000 is a very generous ceiling. Without
+		// it a saved amount is charged to every new subscriber immediately.
+		return nil, errors.New("amount exceeds the $1,000.00 ceiling — double-check the value (it is in dollars)")
 	}
 	if strings.TrimSpace(req.Reason) == "" {
 		return nil, errors.New("a reason is required for price changes")
@@ -173,14 +207,18 @@ func (s *Service) UpdatePrice(adminID int64, tier string, req models.UpdatePrice
 			log.Printf("[billing] load subscribers for %s notice failed: %v", tier, sErr)
 		} else {
 			subject, bodyTmpl := priceIncreaseEmail(tier, *oldAmount, req.Amount)
+			queued := 0
 			for _, c := range subs {
 				body := fmt.Sprintf(bodyTmpl, firstName(c.Name))
 				if qErr := s.store.QueueEmail(c.Email, c.UserID, subject, body, "price_change"); qErr != nil {
 					log.Printf("[billing] queue price notice to %s failed: %v", c.Email, qErr)
+					continue
 				}
+				queued++
 			}
-			pc.NotifiedExisting = true
-			pc.AffectedSubscribers = len(subs)
+			// Count only notices actually queued (not the whole subscriber set).
+			pc.NotifiedExisting = queued > 0
+			pc.AffectedSubscribers = queued
 		}
 	}
 
@@ -211,16 +249,20 @@ func firstName(name string) string {
 
 // priceIncreaseEmail returns the subject and a body template (one %s for the
 // recipient's first name) for an advance price-increase notice.
+// priceIncreaseEmail returns the subject and a body template (one %s for the
+// recipient's first name). Existing subscribers are GRANDFATHERED — their price
+// does not change — so the message says exactly that (only new subscribers pay
+// the new amount). Do NOT tell current subscribers their price is rising.
 func priceIncreaseEmail(tier string, oldAmt, newAmt int64) (subject, bodyTemplate string) {
 	plan := tierDisplayName(tier)
-	subject = "An update to your Score Right subscription price"
+	subject = "An update to Score Right pricing"
 	bodyTemplate = fmt.Sprintf(`Hi %%s,
 
-We're writing to let you know the price of the Score Right %s plan is changing from $%.2f to $%.2f.
+We're updating the price of the Score Right %s plan from $%.2f to $%.2f for new subscribers.
 
-Your price takes effect on your next renewal — there's nothing you need to do to keep studying. You can review or cancel your subscription anytime under Settings → Subscription.
+Good news: as a current subscriber, your rate is locked in — you'll keep paying $%.2f and nothing on your account changes. You can review or manage your subscription anytime under Settings → Subscription.
 
 Thanks for studying with Score Right.
-— The Score Right team`, plan, float64(oldAmt)/100, float64(newAmt)/100)
+— The Score Right team`, plan, float64(oldAmt)/100, float64(newAmt)/100, float64(oldAmt)/100)
 	return subject, bodyTemplate
 }
