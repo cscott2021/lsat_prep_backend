@@ -21,6 +21,32 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 }
 
+// TestSubscribePriceAllowlist proves the money-safety guarantee that Subscribe
+// only accepts our configured plan prices — a client cannot pass an arbitrary,
+// foreign, or archived Stripe price id and still get entitlement.
+func TestSubscribePriceAllowlist(t *testing.T) {
+	svc := &Service{cfg: Config{
+		PriceMonthly:   "price_m",
+		PriceQuarterly: "price_q",
+		PriceAnnual:    "price_a",
+	}}
+	for _, id := range []string{"price_m", "price_q", "price_a"} {
+		if !svc.isConfiguredPrice(id) {
+			t.Errorf("configured price %q should be allowed", id)
+		}
+	}
+	for _, id := range []string{"price_bogus", "price_cheap_001", "", "PRICE_M", "price_"} {
+		if svc.isConfiguredPrice(id) {
+			t.Errorf("non-configured price %q must be rejected", id)
+		}
+	}
+	// An unset configured slot must never match an empty candidate id.
+	unset := &Service{cfg: Config{PriceMonthly: "", PriceQuarterly: "", PriceAnnual: ""}}
+	if unset.isConfiguredPrice("") {
+		t.Errorf("empty price must not match unset configured prices")
+	}
+}
+
 func TestConfigEnabledAndWebhook(t *testing.T) {
 	t.Setenv("STRIPE_SECRET_KEY", "sk_test_x")
 	t.Setenv("STRIPE_WEBHOOK_SECRET", "")
