@@ -11,6 +11,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/lsat-prep/backend/internal/auth"
+	"github.com/lsat-prep/backend/internal/billing"
 	"github.com/lsat-prep/backend/internal/database"
 	"github.com/lsat-prep/backend/internal/gamification"
 	"github.com/lsat-prep/backend/internal/generator"
@@ -77,6 +78,15 @@ func main() {
 	learnService := learn.NewService(learnStore)
 	learnHandler := learn.NewHandler(learnService)
 
+	// Initialize billing (Stripe). Config comes from the environment; if
+	// STRIPE_SECRET_KEY is unset billing is DISABLED gracefully — endpoints
+	// return 503, the paywall fails open, and the server still starts. This lets
+	// nonprod run with no Stripe keys at all.
+	billingCfg := billing.LoadConfig()
+	billingStore := billing.NewStore(db)
+	billingService := billing.NewService(billingCfg, billingStore)
+	billingHandler := billing.NewHandler(billingService)
+
 	// Start background workers
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -92,6 +102,12 @@ func main() {
 	api.HandleFunc("/auth/register", authHandler.Register).Methods("POST")
 	api.HandleFunc("/auth/login", authHandler.Login).Methods("POST")
 
+	// Stripe webhook — PUBLIC by necessity: Stripe cannot present a bearer token,
+	// so it is mounted OUTSIDE AuthMiddleware. The request is authenticated by the
+	// Stripe signature (verified with STRIPE_WEBHOOK_SECRET) inside the handler,
+	// and processed idempotently via the billing_events table.
+	billingHandler.RegisterWebhook(api)
+
 	// Protected routes
 	protected := api.PathPrefix("").Subrouter()
 	protected.Use(middleware.AuthMiddleware)
@@ -101,14 +117,34 @@ func main() {
 	protected.HandleFunc("/users/ability", questionHandler.GetAbility).Methods("GET")
 	protected.HandleFunc("/users/difficulty-slider", questionHandler.SetDifficultySlider).Methods("PUT")
 
-	// Question endpoints (fixed paths before parameterized)
-	protected.HandleFunc("/questions/generate", questionHandler.GenerateBatch).Methods("POST")
+	// Billing (protected): config, subscription status, subscribe, coupon,
+	// cancel, update-payment, portal. These stay OPEN to any authenticated user
+	// (a non-subscriber must be able to see plans and subscribe).
+	billingHandler.RegisterRoutes(protected)
+
+	// Entitlement-gated core practice endpoints. The drill + question-generation
+	// routes consume paid resources (LLM generation), so they sit behind
+	// RequireEntitlement (HTTP 402 for non-entitled users) IN ADDITION to
+	// AuthMiddleware. Admins, comped, trialing and active users pass; when
+	// billing is unconfigured the gate is open (see billing.RequireEntitlement).
+	//
+	// This subrouter is created before the parameterized /questions/{id} route so
+	// its fixed drill paths are matched first (gorilla/mux matches in
+	// registration order). To change what is gated, move a route between the
+	// `entitled` subrouter and `protected`.
+	entitled := protected.PathPrefix("").Subrouter()
+	entitled.Use(billing.RequireEntitlement(billingService))
+	entitled.HandleFunc("/questions/generate", questionHandler.GenerateBatch).Methods("POST")
+	entitled.HandleFunc("/questions/quick-drill", questionHandler.QuickDrill).Methods("POST")
+	entitled.HandleFunc("/questions/subtype-drill", questionHandler.SubtypeDrill).Methods("POST")
+	entitled.HandleFunc("/questions/rc-drill", questionHandler.RCDrill).Methods("POST")
+	entitled.HandleFunc("/questions/similar-drill", questionHandler.SimilarDrill).Methods("POST")
+
+	// Remaining question endpoints (fixed paths before parameterized). Left OPEN
+	// so an in-progress drill, history review and answer submission keep working
+	// regardless of entitlement.
 	protected.HandleFunc("/questions/batches", questionHandler.ListBatches).Methods("GET")
 	protected.HandleFunc("/questions/batches/{id}", questionHandler.GetBatch).Methods("GET")
-	protected.HandleFunc("/questions/quick-drill", questionHandler.QuickDrill).Methods("POST")
-	protected.HandleFunc("/questions/subtype-drill", questionHandler.SubtypeDrill).Methods("POST")
-	protected.HandleFunc("/questions/rc-drill", questionHandler.RCDrill).Methods("POST")
-	protected.HandleFunc("/questions/similar-drill", questionHandler.SimilarDrill).Methods("POST")
 	// Offramp poll: how many unseen questions are ready + whether more are coming.
 	protected.HandleFunc("/questions/generation-status", questionHandler.GenerationStatus).Methods("GET")
 	protected.HandleFunc("/questions/{id}", questionHandler.GetQuestion).Methods("GET")
@@ -154,6 +190,9 @@ func main() {
 	admin.HandleFunc("/questions", questionHandler.GetAdminQuestions).Methods("GET")
 	admin.HandleFunc("/question-spread", questionHandler.GetQuestionSpread).Methods("GET")
 	admin.HandleFunc("/user-progress", questionHandler.GetUserProgress).Methods("GET")
+	// Admin billing: create/list coupons (Stripe coupon + promotion code) and
+	// grant/revoke manual comps.
+	billingHandler.RegisterAdminRoutes(admin)
 
 	// History & bookmarks
 	questionHandler.RegisterHistoryRoutes(protected)
