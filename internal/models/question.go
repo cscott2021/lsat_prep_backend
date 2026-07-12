@@ -238,6 +238,9 @@ type RCDrillResponse struct {
 	Total     int             `json:"total"`
 	Page      int             `json:"page"`
 	PageSize  int             `json:"page_size"`
+	// Generating is true when fewer questions than requested were served and
+	// more are being generated in the background (drives the client offramp).
+	Generating bool `json:"generating"`
 }
 
 // ── Response Types ────────────────────────────────────
@@ -302,6 +305,9 @@ type DrillListResponse struct {
 	Total     int             `json:"total"`
 	Page      int             `json:"page"`
 	PageSize  int             `json:"page_size"`
+	// Generating is true when fewer questions than requested were served and
+	// more are being generated in the background (drives the client offramp).
+	Generating bool `json:"generating"`
 }
 
 // ToDrillQuestion returns the answer-stripped serving view of a question: it

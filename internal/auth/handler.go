@@ -128,9 +128,9 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	var user models.User
 	var hashedPassword string
 	err := h.db.QueryRow(
-		`SELECT id, email, name, COALESCE(username, ''), password, created_at, updated_at FROM users WHERE email = $1`,
+		`SELECT id, email, name, COALESCE(username, ''), password, created_at, updated_at, is_admin FROM users WHERE email = $1`,
 		req.Email,
-	).Scan(&user.ID, &user.Email, &user.Name, &user.Username, &hashedPassword, &user.CreatedAt, &user.UpdatedAt)
+	).Scan(&user.ID, &user.Email, &user.Name, &user.Username, &hashedPassword, &user.CreatedAt, &user.UpdatedAt, &user.IsAdmin)
 
 	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusUnauthorized, models.ErrorResponse{Error: "Invalid email or password"})
@@ -160,9 +160,9 @@ func (h *Handler) GetCurrentUser(w http.ResponseWriter, r *http.Request) {
 
 	var user models.User
 	err := h.db.QueryRow(
-		`SELECT id, email, name, COALESCE(username, ''), created_at, updated_at FROM users WHERE id = $1`,
+		`SELECT id, email, name, COALESCE(username, ''), created_at, updated_at, is_admin FROM users WHERE id = $1`,
 		userID,
-	).Scan(&user.ID, &user.Email, &user.Name, &user.Username, &user.CreatedAt, &user.UpdatedAt)
+	).Scan(&user.ID, &user.Email, &user.Name, &user.Username, &user.CreatedAt, &user.UpdatedAt, &user.IsAdmin)
 
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, models.ErrorResponse{Error: "User not found"})

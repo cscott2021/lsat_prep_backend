@@ -263,10 +263,11 @@ func (h *Handler) QuickDrill(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, models.DrillListResponse{
-		Questions: questions,
-		Total:     len(questions),
-		Page:      1,
-		PageSize:  req.Count,
+		Questions:  questions,
+		Total:      len(questions),
+		Page:       1,
+		PageSize:   req.Count,
+		Generating: len(questions) < req.Count,
 	})
 }
 
@@ -326,10 +327,11 @@ func (h *Handler) SubtypeDrill(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, models.DrillListResponse{
-		Questions: questions,
-		Total:     len(questions),
-		Page:      1,
-		PageSize:  req.Count,
+		Questions:  questions,
+		Total:      len(questions),
+		Page:       1,
+		PageSize:   req.Count,
+		Generating: len(questions) < req.Count,
 	})
 }
 

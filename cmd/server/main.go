@@ -109,6 +109,8 @@ func main() {
 	protected.HandleFunc("/questions/subtype-drill", questionHandler.SubtypeDrill).Methods("POST")
 	protected.HandleFunc("/questions/rc-drill", questionHandler.RCDrill).Methods("POST")
 	protected.HandleFunc("/questions/similar-drill", questionHandler.SimilarDrill).Methods("POST")
+	// Offramp poll: how many unseen questions are ready + whether more are coming.
+	protected.HandleFunc("/questions/generation-status", questionHandler.GenerationStatus).Methods("GET")
 	protected.HandleFunc("/questions/{id}", questionHandler.GetQuestion).Methods("GET")
 	protected.HandleFunc("/questions/{id}/answer", questionHandler.SubmitAnswer).Methods("POST")
 
@@ -148,6 +150,10 @@ func main() {
 	admin.HandleFunc("/flagged", questionHandler.GetFlaggedQuestions).Methods("GET")
 	admin.HandleFunc("/export", questionHandler.ExportQuestions).Methods("GET")
 	admin.HandleFunc("/import", questionHandler.ImportQuestions).Methods("POST")
+	// Admin dashboards: question-bank browser, bank composition, user progress.
+	admin.HandleFunc("/questions", questionHandler.GetAdminQuestions).Methods("GET")
+	admin.HandleFunc("/question-spread", questionHandler.GetQuestionSpread).Methods("GET")
+	admin.HandleFunc("/user-progress", questionHandler.GetUserProgress).Methods("GET")
 
 	// History & bookmarks
 	questionHandler.RegisterHistoryRoutes(protected)

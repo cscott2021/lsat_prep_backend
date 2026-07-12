@@ -37,6 +37,7 @@ type Service struct {
 	autoGenEnabledLR   bool
 	autoGenEnabledRC   bool
 	autoGenMinUnseen   int
+	autoGenBatchSize   int
 	gamService         *gamification.Service
 }
 
@@ -49,15 +50,25 @@ func NewService(store *Store, gen *generator.Generator, val *generator.Validator
 	validationEnabled := os.Getenv("VALIDATION_ENABLED") != "false"
 	adversarialEnabled := os.Getenv("ADVERSARIAL_ENABLED") != "false"
 
-	// Auto-generation section flags
+	// Auto-generation section flags. Both default on so questions are always
+	// generated ahead of demand (the offramp handles the rare cold-start wait).
 	autoGenEnabledLR := os.Getenv("AUTO_GEN_ENABLED_LR") != "false"
-	autoGenEnabledRC := os.Getenv("AUTO_GEN_ENABLED_RC") == "true"
+	autoGenEnabledRC := os.Getenv("AUTO_GEN_ENABLED_RC") != "false"
 
-	// Minimum unseen questions before triggering generation
-	autoGenMinUnseen := 4
+	// Stay-ahead buffer: keep at least this many UNSEEN questions ready for each
+	// user in a subtype they are drilling, so they never run out mid-session.
+	autoGenMinUnseen := 20
 	if v := os.Getenv("AUTO_GEN_MIN_UNSEEN"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			autoGenMinUnseen = n
+		}
+	}
+
+	// How many questions to request per difficulty bucket when topping up.
+	autoGenBatchSize := 10
+	if v := os.Getenv("AUTO_GEN_BATCH_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			autoGenBatchSize = n
 		}
 	}
 
@@ -79,6 +90,7 @@ func NewService(store *Store, gen *generator.Generator, val *generator.Validator
 		autoGenEnabledLR:   autoGenEnabledLR,
 		autoGenEnabledRC:   autoGenEnabledRC,
 		autoGenMinUnseen:   autoGenMinUnseen,
+		autoGenBatchSize:   autoGenBatchSize,
 	}
 }
 
@@ -663,32 +675,12 @@ func (s *Service) GetSubtypeDrill(ctx context.Context, userID int64, req models.
 		}
 	}
 
-	// Synchronous generation fallback if 0 questions found
-	if len(questions) == 0 {
-		difficulty := mapScoreToDifficulty(target)
-		genReq := models.GenerateBatchRequest{
-			Section:    models.Section(req.Section),
-			Difficulty: difficulty,
-			Count:      req.Count,
-		}
-		if req.LRSubtype != nil {
-			ls := models.LRSubtype(*req.LRSubtype)
-			genReq.LRSubtype = &ls
-		}
-
-		_, genErr := s.GenerateBatch(ctx, genReq)
-		if genErr != nil {
-			log.Printf("WARN: synchronous generation failed for subtype drill: %v", genErr)
-		} else {
-			// Retry fetch after generation
-			questions, _ = s.store.GetAdaptiveQuestions(
-				userID, req.Section, &subtype, minDiff, maxDiff, req.Count, nil,
-			)
-		}
-	}
-
-	// Async queue
+	// Non-blocking: never generate synchronously in the request path (that used
+	// to block the user for up to two minutes and then fall back to mock data).
+	// Serve whatever is ready now and keep this user's buffer topped up in the
+	// background so they stay well ahead of where they are.
 	go s.CheckAndQueueGeneration(req.Section, &subtype, minDiff, maxDiff)
+	go s.CheckUserInventoryAndQueue(userID, req.Section, subtype)
 
 	return questions, nil
 }
@@ -741,32 +733,15 @@ func (s *Service) GetRCDrill(ctx context.Context, userID int64, req models.RCDri
 		}
 	}
 
-	// Synchronous generation fallback
+	// Non-blocking: if no passage is ready, enqueue RC generation and return a
+	// "generating" response so the client shows the come-back-later offramp
+	// instead of blocking on a multi-call LLM pipeline.
 	if passage == nil {
-		difficulty := mapScoreToDifficulty(target)
-		genReq := models.GenerateBatchRequest{
-			Section:    models.SectionRC,
-			Difficulty: difficulty,
-			Count:      6,
-		}
-
-		log.Printf("[rc-drill] No passage found, generating synchronously")
-		_, genErr := s.GenerateBatch(ctx, genReq)
-		if genErr != nil {
-			log.Printf("WARN: RC synchronous generation failed: %v", genErr)
-		} else {
-			// Retry after generation
-			passage, questions, err = s.store.GetRCPassageWithQuestions(
-				userID, 0, 100, req.RCSubtype, req.Comparative, req.Count,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("rc drill (post-gen): %w", err)
-			}
-		}
-	}
-
-	if passage == nil {
-		return nil, fmt.Errorf("no RC passages available")
+		go s.CheckRCInventory(minDiff, maxDiff, req.RCSubtype)
+		return &models.RCDrillResponse{
+			Questions:  []models.DrillQuestion{},
+			Generating: true,
+		}, nil
 	}
 
 	// Convert to drill questions (strip answer data)
@@ -797,11 +772,12 @@ func (s *Service) GetRCDrill(ctx context.Context, userID int64, req models.RCDri
 	go s.CheckRCInventory(minDiff, maxDiff, req.RCSubtype)
 
 	return &models.RCDrillResponse{
-		Passage:   drillPassage,
-		Questions: drillQuestions,
-		Total:     len(drillQuestions),
-		Page:      1,
-		PageSize:  req.Count,
+		Passage:    drillPassage,
+		Questions:  drillQuestions,
+		Total:      len(drillQuestions),
+		Page:       1,
+		PageSize:   req.Count,
+		Generating: len(drillQuestions) < req.Count,
 	}, nil
 }
 
@@ -968,11 +944,15 @@ func (s *Service) CheckUserInventoryAndQueue(userID int64, section string, subty
 		{61, 80, "hard"}, {81, 100, "hard"},
 	}
 
+	batch := s.autoGenBatchSize
+	if batch <= 0 {
+		batch = 10
+	}
 	for _, b := range buckets {
 		if b.max < minDiff || b.min > maxDiff {
 			continue
 		}
-		s.store.UpsertGenerationQueue(section, &subtype, b.min, b.max, b.difficulty, 6)
+		s.store.UpsertGenerationQueue(section, &subtype, b.min, b.max, b.difficulty, batch)
 	}
 }
 
