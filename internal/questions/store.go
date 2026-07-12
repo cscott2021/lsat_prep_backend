@@ -278,95 +278,6 @@ func (s *Store) GetQuestionWithChoices(questionID int64) (*models.Question, erro
 	return &q, nil
 }
 
-func (s *Store) GetDrillQuestions(section models.Section, subtype *models.LRSubtype, difficulty models.Difficulty, count int) ([]models.Question, error) {
-	var rows *sql.Rows
-	var err error
-
-	qCols := `q.id, q.batch_id, q.section, q.lr_subtype, q.rc_subtype, q.difficulty, q.difficulty_score,
-		q.stimulus, q.question_stem, q.correct_answer_id, q.explanation,
-		q.passage_id, q.quality_score, q.validation_status, q.validation_reasoning,
-		q.adversarial_score, q.flagged, q.times_served, q.times_correct, q.created_at`
-	acCols := `ac.id, ac.choice_id, ac.choice_text, ac.explanation, ac.is_correct, COALESCE(ac.wrong_answer_type, '')`
-
-	// Filter: only serve passed/unvalidated questions with acceptable quality
-	// Flagged questions require admin review before serving
-	validationFilter := `AND q.validation_status IN ('passed', 'unvalidated')
-		AND (q.quality_score >= 0.50 OR q.quality_score IS NULL)`
-
-	if subtype != nil {
-		rows, err = s.db.Query(
-			fmt.Sprintf(`SELECT %s, %s
-			 FROM questions q
-			 JOIN answer_choices ac ON ac.question_id = q.id
-			 WHERE q.section = $1 AND q.lr_subtype = $2 AND q.difficulty = $3
-			 %s
-			 ORDER BY q.times_served ASC, q.id, ac.choice_id
-			 LIMIT $4`, qCols, acCols, validationFilter),
-			section, *subtype, difficulty, count*5,
-		)
-	} else {
-		rows, err = s.db.Query(
-			fmt.Sprintf(`SELECT %s, %s
-			 FROM questions q
-			 JOIN answer_choices ac ON ac.question_id = q.id
-			 WHERE q.section = $1 AND q.difficulty = $2
-			 %s
-			 ORDER BY q.times_served ASC, q.id, ac.choice_id
-			 LIMIT $3`, qCols, acCols, validationFilter),
-			section, difficulty, count*5,
-		)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get drill questions: %w", err)
-	}
-	defer rows.Close()
-
-	return s.scanQuestionsWithChoices(rows, count)
-}
-
-func (s *Store) scanQuestionsWithChoices(rows *sql.Rows, maxQuestions int) ([]models.Question, error) {
-	questionMap := make(map[int64]*models.Question)
-	var questionOrder []int64
-
-	for rows.Next() {
-		var q models.Question
-		var choice models.AnswerChoice
-
-		if err := rows.Scan(
-			&q.ID, &q.BatchID, &q.Section, &q.LRSubtype, &q.RCSubtype, &q.Difficulty, &q.DifficultyScore,
-			&q.Stimulus, &q.QuestionStem, &q.CorrectAnswerID, &q.Explanation,
-			&q.PassageID, &q.QualityScore, &q.ValidationStatus, &q.ValidationReasoning,
-			&q.AdversarialScore, &q.Flagged, &q.TimesServed, &q.TimesCorrect, &q.CreatedAt,
-			&choice.ID, &choice.ChoiceID, &choice.ChoiceText, &choice.Explanation, &choice.IsCorrect,
-			&choice.WrongAnswerType,
-		); err != nil {
-			return nil, fmt.Errorf("scan question row: %w", err)
-		}
-
-		choice.QuestionID = q.ID
-
-		if existing, ok := questionMap[q.ID]; ok {
-			existing.Choices = append(existing.Choices, choice)
-		} else {
-			if len(questionMap) >= maxQuestions {
-				continue
-			}
-			q.Choices = []models.AnswerChoice{choice}
-			questionMap[q.ID] = &q
-			questionOrder = append(questionOrder, q.ID)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	questions := make([]models.Question, 0, len(questionOrder))
-	for _, id := range questionOrder {
-		questions = append(questions, *questionMap[id])
-	}
-	return questions, nil
-}
-
 func (s *Store) getChoicesForQuestion(questionID int64) ([]models.AnswerChoice, error) {
 	rows, err := s.db.Query(
 		`SELECT id, question_id, choice_id, choice_text, explanation, is_correct, COALESCE(wrong_answer_type, '')
@@ -2125,6 +2036,27 @@ func (s *Store) GetUserHistoryStats(userID int64) (*models.HistoryStatsResponse,
 	return stats, nil
 }
 
+// stripUnansweredAnswer blanks the answer-bearing fields of a review question
+// the user has NOT answered yet. The review/bookmark endpoints LEFT JOIN the
+// answer history so they can show questions regardless of answer state, but the
+// correct answer, explanation, and per-choice answer data must never be revealed
+// for a question the user hasn't actually answered — otherwise a client can
+// enumerate answers (POST /history/drill-review with arbitrary ids) or bookmark
+// an unanswered question and read its key back. Answered questions are left
+// untouched, since revealing the answer post-answer is the intended behavior.
+func stripUnansweredAnswer(hq *models.HistoryQuestion) {
+	if !hq.AnsweredAt.IsZero() {
+		return
+	}
+	hq.CorrectAnswerID = ""
+	hq.Explanation = ""
+	for i := range hq.Choices {
+		hq.Choices[i].IsCorrect = false
+		hq.Choices[i].Explanation = ""
+		hq.Choices[i].WrongAnswerType = ""
+	}
+}
+
 func (s *Store) GetDrillReview(userID int64, questionIDs []int64) ([]models.HistoryQuestion, error) {
 	if len(questionIDs) == 0 {
 		return nil, nil
@@ -2216,6 +2148,8 @@ func (s *Store) GetDrillReview(userID int64, questionIDs []int64) ([]models.Hist
 		if questions[i].Choices == nil {
 			questions[i].Choices = []models.AnswerChoice{}
 		}
+		// Do not reveal answers for any posted question the user hasn't answered.
+		stripUnansweredAnswer(&questions[i])
 	}
 
 	// Batch load passages
@@ -2352,6 +2286,9 @@ func (s *Store) GetBookmarks(userID int64, page, pageSize int) ([]models.Bookmar
 			if bookmarks[i].Question.Choices == nil {
 				bookmarks[i].Question.Choices = []models.AnswerChoice{}
 			}
+			// A bookmark can be created for an unanswered question; never reveal
+			// its answer until the user has actually answered it.
+			stripUnansweredAnswer(bookmarks[i].Question)
 		}
 	}
 

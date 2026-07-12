@@ -353,10 +353,6 @@ func (s *Service) GetQuestion(questionID int64) (*models.Question, error) {
 	return s.store.GetQuestionWithChoices(questionID)
 }
 
-func (s *Service) GetDrillQuestions(section models.Section, subtype *models.LRSubtype, difficulty models.Difficulty, count int) ([]models.Question, error) {
-	return s.store.GetDrillQuestions(section, subtype, difficulty, count)
-}
-
 func (s *Service) GetPassage(passageID int64) (*models.RCPassage, error) {
 	return s.store.GetPassage(passageID)
 }

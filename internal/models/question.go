@@ -304,6 +304,33 @@ type DrillListResponse struct {
 	PageSize  int             `json:"page_size"`
 }
 
+// ToDrillQuestion returns the answer-stripped serving view of a question: it
+// omits correct_answer_id, explanation, and every per-choice answer field
+// (is_correct / explanation / wrong_answer_type). Use it for any endpoint that
+// serves a question to a user BEFORE they answer, so the correct answer never
+// reaches the client (the server grades on submit). Passage content is not
+// included here; RC serving paths build their own DrillPassage.
+func (q *Question) ToDrillQuestion() DrillQuestion {
+	dq := DrillQuestion{
+		ID:              q.ID,
+		Section:         q.Section,
+		LRSubtype:       q.LRSubtype,
+		RCSubtype:       q.RCSubtype,
+		Difficulty:      q.Difficulty,
+		DifficultyScore: q.DifficultyScore,
+		Stimulus:        q.Stimulus,
+		QuestionStem:    q.QuestionStem,
+		Choices:         make([]DrillChoice, 0, len(q.Choices)),
+	}
+	for _, c := range q.Choices {
+		dq.Choices = append(dq.Choices, DrillChoice{
+			ChoiceID:   c.ChoiceID,
+			ChoiceText: c.ChoiceText,
+		})
+	}
+	return dq
+}
+
 // ── Admin Types ───────────────────────────────────────
 
 type QualityStats struct {

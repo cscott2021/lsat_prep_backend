@@ -129,7 +129,12 @@ func (h *Handler) GetQuestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, question)
+	// Serve the answer-stripped view. Returning the full question here leaked
+	// correct_answer_id, explanation, and per-choice is_correct to any
+	// authenticated user before they answered — letting them ace first attempts
+	// and inflate ability/XP/leaderboard. The answer is revealed only in the
+	// submit response (POST /questions/{id}/answer).
+	writeJSON(w, http.StatusOK, question.ToDrillQuestion())
 }
 
 func (h *Handler) SubmitAnswer(w http.ResponseWriter, r *http.Request) {
