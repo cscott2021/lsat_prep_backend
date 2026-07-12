@@ -7,9 +7,10 @@
 // guard, and the price allowlist.
 //
 // Run:
-//   docker run -d -p 12111:12111 stripe/stripe-mock
-//   createdb lsat_billing_test && apply migrations
-//   go test -tags billinge2e -run TestBillingE2E ./internal/billing/ -v
+//
+//	docker run -d -p 12111:12111 stripe/stripe-mock
+//	createdb lsat_billing_test && apply migrations
+//	go test -tags billinge2e -run TestBillingE2E ./internal/billing/ -v
 package billing
 
 import (

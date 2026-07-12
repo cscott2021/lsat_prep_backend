@@ -9,6 +9,7 @@ import (
 	"github.com/stripe/stripe-go/v81/coupon"
 	"github.com/stripe/stripe-go/v81/customer"
 	"github.com/stripe/stripe-go/v81/price"
+	"github.com/stripe/stripe-go/v81/product"
 	"github.com/stripe/stripe-go/v81/promotioncode"
 	"github.com/stripe/stripe-go/v81/setupintent"
 	"github.com/stripe/stripe-go/v81/subscription"
@@ -23,28 +24,27 @@ var ErrPromotionNotFound = errors.New("promotion code not found")
 // so the service/handlers stay free of SDK types. Stripe's Go SDK uses a single
 // process-global API key (stripe.Key), set once in newStripeProvider.
 type stripeProvider struct {
-	cfg Config
+	cfg   Config
+	store *Store // for resolving dynamic (DB-managed) price ids back to tiers
 }
 
-func newStripeProvider(cfg Config) *stripeProvider {
+func newStripeProvider(cfg Config, store *Store) *stripeProvider {
 	// Package-global key; safe because the whole process talks to one account.
 	stripe.Key = cfg.SecretKey
-	return &stripeProvider{cfg: cfg}
+	return &stripeProvider{cfg: cfg, store: store}
 }
 
 // planForPrice maps a Stripe price id back to a stable, human plan name using the
 // configured monthly/annual price ids. Unknown prices fall back to the raw id.
 func (p *stripeProvider) planForPrice(priceID string) string {
-	switch priceID {
-	case p.cfg.PriceMonthly:
-		return "monthly"
-	case p.cfg.PriceQuarterly:
-		return "quarterly"
-	case p.cfg.PriceAnnual:
-		return "annual"
-	default:
-		return priceID
+	// Prices are admin-managed in the DB; resolve via plan_prices + history so a
+	// grandfathered subscriber on an archived price still maps to its tier.
+	if p.store != nil {
+		if tier, err := p.store.TierForPriceID(priceID); err == nil && tier != "" {
+			return tier
+		}
 	}
+	return priceID
 }
 
 // EnsureCustomer returns an existing Stripe customer id if one is passed,
@@ -148,6 +148,57 @@ func (p *stripeProvider) CreatePortalSession(customerID, returnURL string) (stri
 // interval without the client hardcoding them.
 func (p *stripeProvider) GetPrice(priceID string) (*stripe.Price, error) {
 	return price.Get(priceID, nil)
+}
+
+// EnsureProduct returns the id of the "Score Right Premium" product, reusing an
+// existing one (tagged via metadata) if present, else creating it. Idempotent so
+// re-seeding never spawns duplicate products.
+func (p *stripeProvider) EnsureProduct() (string, error) {
+	listParams := &stripe.ProductListParams{Active: stripe.Bool(true)}
+	listParams.Limit = stripe.Int64(100)
+	iter := product.List(listParams)
+	for iter.Next() {
+		pr := iter.Product()
+		if pr.Metadata["app"] == "scoreright" && pr.Metadata["kind"] == "premium" {
+			return pr.ID, nil
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return "", err
+	}
+	params := &stripe.ProductParams{Name: stripe.String("Score Right Premium")}
+	params.AddMetadata("app", "scoreright")
+	params.AddMetadata("kind", "premium")
+	created, err := product.New(params)
+	if err != nil {
+		return "", err
+	}
+	return created.ID, nil
+}
+
+// CreatePrice creates a new recurring Stripe Price under productID. Stripe Prices
+// are immutable, so changing a plan's amount means creating a new one.
+func (p *stripeProvider) CreatePrice(productID, currency, interval string, intervalCount, amount int64) (*stripe.Price, error) {
+	params := &stripe.PriceParams{
+		Product:    stripe.String(productID),
+		Currency:   stripe.String(currency),
+		UnitAmount: stripe.Int64(amount),
+		Recurring: &stripe.PriceRecurringParams{
+			Interval:      stripe.String(interval),
+			IntervalCount: stripe.Int64(intervalCount),
+		},
+	}
+	return price.New(params)
+}
+
+// ArchivePrice deactivates a Stripe Price (they cannot be deleted). Existing
+// subscriptions keep billing on it; it just can't back new subscriptions.
+func (p *stripeProvider) ArchivePrice(priceID string) error {
+	if priceID == "" {
+		return nil
+	}
+	_, err := price.Update(priceID, &stripe.PriceParams{Active: stripe.Bool(false)})
+	return err
 }
 
 // LookupPromotion resolves a customer-facing code and returns a normalized

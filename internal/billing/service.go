@@ -29,7 +29,7 @@ type Service struct {
 func NewService(cfg Config, store *Store) *Service {
 	svc := &Service{cfg: cfg, store: store}
 	if cfg.Enabled() {
-		svc.stripe = newStripeProvider(cfg)
+		svc.stripe = newStripeProvider(cfg, store)
 		log.Printf("[billing] Stripe billing enabled (trial_days=%d)", cfg.TrialDays)
 	} else {
 		log.Printf("[billing] STRIPE_SECRET_KEY not set — billing disabled; endpoints return 503 and paywall is open")
@@ -58,29 +58,22 @@ func (s *Service) BuildConfigResponse() (*models.BillingConfigResponse, error) {
 		TrialDays:      s.cfg.TrialDays,
 		Plans:          []models.BillingPlan{},
 	}
-	plans := []struct {
-		id, name, priceID string
-	}{
-		{"monthly", "Monthly", s.cfg.PriceMonthly},
-		{"quarterly", "Quarterly", s.cfg.PriceQuarterly},
-		{"annual", "Annual", s.cfg.PriceAnnual},
+	// Plans are built from the admin-managed plan_prices table (the DB is the
+	// source of truth for amounts/cadence — no per-request Stripe call needed).
+	prices, err := s.store.GetPlanPrices()
+	if err != nil {
+		return nil, err
 	}
-	for _, pl := range plans {
-		if pl.priceID == "" {
-			continue
-		}
-		bp := models.BillingPlan{ID: pl.id, Name: pl.name, PriceID: pl.priceID}
-		if pr, err := s.stripe.GetPrice(pl.priceID); err != nil {
-			log.Printf("[billing] could not fetch price %s: %v", pl.priceID, err)
-		} else {
-			bp.Amount = pr.UnitAmount
-			bp.Currency = string(pr.Currency)
-			if pr.Recurring != nil {
-				bp.Interval = string(pr.Recurring.Interval)
-				bp.IntervalCount = pr.Recurring.IntervalCount
-			}
-		}
-		resp.Plans = append(resp.Plans, bp)
+	for _, p := range prices {
+		resp.Plans = append(resp.Plans, models.BillingPlan{
+			ID:            p.Tier,
+			Name:          tierDisplayName(p.Tier),
+			PriceID:       p.StripePriceID,
+			Interval:      p.Interval,
+			IntervalCount: p.IntervalCount,
+			Amount:        p.Amount,
+			Currency:      p.Currency,
+		})
 	}
 	return resp, nil
 }
@@ -117,12 +110,11 @@ func (s *Service) GetSubscriptionResponse(userID int64) (*models.SubscriptionRes
 	return resp, nil
 }
 
-// isConfiguredPrice reports whether priceID matches one of our configured plan
-// prices (monthly / quarterly / annual). Empty configured ids never match.
+// isConfiguredPrice reports whether priceID is a currently-active plan price
+// (admin-managed in plan_prices). Only these may back a new subscription.
 func (s *Service) isConfiguredPrice(priceID string) bool {
-	return (s.cfg.PriceMonthly != "" && priceID == s.cfg.PriceMonthly) ||
-		(s.cfg.PriceQuarterly != "" && priceID == s.cfg.PriceQuarterly) ||
-		(s.cfg.PriceAnnual != "" && priceID == s.cfg.PriceAnnual)
+	ok, err := s.store.IsActivePriceID(priceID)
+	return err == nil && ok
 }
 
 // Subscribe creates (or reuses) the Stripe customer and starts an incomplete

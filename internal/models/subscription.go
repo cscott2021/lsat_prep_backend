@@ -156,3 +156,48 @@ type CompRequest struct {
 	UserID int64  `json:"user_id"`
 	Action string `json:"action"` // "grant" | "revoke"
 }
+
+// ── Admin pricing DTOs ────────────────────────────────────
+
+// PlanPrice is the current active price for a plan tier. Source of truth is the
+// plan_prices table; /billing/config is built from these.
+type PlanPrice struct {
+	Tier            string    `json:"tier"`
+	StripePriceID   string    `json:"stripe_price_id"`
+	StripeProductID string    `json:"-"`
+	Amount          int64     `json:"amount"` // minor units (cents)
+	Currency        string    `json:"currency"`
+	Interval        string    `json:"interval"`
+	IntervalCount   int64     `json:"interval_count"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+// PriceChange is one audited price change (the tracking record).
+type PriceChange struct {
+	ID                  int64     `json:"id"`
+	Tier                string    `json:"tier"`
+	OldAmount           *int64    `json:"old_amount"`
+	NewAmount           int64     `json:"new_amount"`
+	OldPriceID          string    `json:"old_price_id,omitempty"`
+	NewPriceID          string    `json:"new_price_id"`
+	ChangedBy           *int64    `json:"changed_by"`
+	ChangedByName       string    `json:"changed_by_name,omitempty"`
+	Reason              string    `json:"reason"`
+	NotifiedExisting    bool      `json:"notified_existing"`
+	AffectedSubscribers int       `json:"affected_subscribers"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+// UpdatePriceRequest is the admin request to change a tier's price.
+type UpdatePriceRequest struct {
+	Amount         int64  `json:"amount"` // new price in minor units (cents)
+	Reason         string `json:"reason"`
+	NotifyExisting bool   `json:"notify_existing"` // email active subscribers about an increase
+}
+
+// AdminPricingResponse powers the admin Pricing tab: current prices + history.
+type AdminPricingResponse struct {
+	Enabled bool          `json:"enabled"`
+	Prices  []PlanPrice   `json:"prices"`
+	History []PriceChange `json:"history"`
+}

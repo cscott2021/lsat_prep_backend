@@ -52,6 +52,44 @@ func (h *Handler) RegisterAdminRoutes(admin *mux.Router) {
 	admin.HandleFunc("/coupons", h.CreateCoupon).Methods("POST")
 	admin.HandleFunc("/coupons", h.ListCoupons).Methods("GET")
 	admin.HandleFunc("/comp", h.Comp).Methods("POST")
+	admin.HandleFunc("/pricing", h.GetPricing).Methods("GET")
+	admin.HandleFunc("/pricing/{tier}", h.UpdatePricing).Methods("PUT")
+}
+
+// GetPricing returns the current plan prices + change history for the admin UI.
+func (h *Handler) GetPricing(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.service.AdminPricing()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to load pricing"})
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// UpdatePricing changes one tier's price (creates a new Stripe price, audits it,
+// and optionally notifies existing subscribers).
+func (h *Handler) UpdatePricing(w http.ResponseWriter, r *http.Request) {
+	adminID, ok := r.Context().Value("user_id").(int64)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, models.ErrorResponse{Error: "Authentication required"})
+		return
+	}
+	tier := mux.Vars(r)["tier"]
+	var req models.UpdatePriceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: "Invalid request body"})
+		return
+	}
+	change, err := h.service.UpdatePrice(adminID, tier, req)
+	if err != nil {
+		if errors.Is(err, ErrBillingDisabled) {
+			writeJSON(w, http.StatusServiceUnavailable, models.ErrorResponse{Error: "billing not configured"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, change)
 }
 
 // writeDisabledOrError maps a service error to a response: ErrBillingDisabled ->

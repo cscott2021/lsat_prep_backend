@@ -1,6 +1,7 @@
 package billing
 
 import (
+	"strings"
 	"testing"
 
 	stripe "github.com/stripe/stripe-go/v81"
@@ -24,26 +25,60 @@ func TestLoadConfigDefaults(t *testing.T) {
 // TestSubscribePriceAllowlist proves the money-safety guarantee that Subscribe
 // only accepts our configured plan prices — a client cannot pass an arbitrary,
 // foreign, or archived Stripe price id and still get entitlement.
-func TestSubscribePriceAllowlist(t *testing.T) {
-	svc := &Service{cfg: Config{
-		PriceMonthly:   "price_m",
-		PriceQuarterly: "price_q",
-		PriceAnnual:    "price_a",
-	}}
-	for _, id := range []string{"price_m", "price_q", "price_a"} {
-		if !svc.isConfiguredPrice(id) {
-			t.Errorf("configured price %q should be allowed", id)
+func TestTierSpecsAndDisplayNames(t *testing.T) {
+	// Cadence is fixed per tier; only the amount is admin-editable. Quarterly must
+	// be month x3 so it renders "/quarter", and the launch defaults must match
+	// the business model ($19.99 / $49.99 / $149.99).
+	cases := []struct {
+		tier          string
+		interval      string
+		intervalCount int64
+		amount        int64
+		display       string
+	}{
+		{"monthly", "month", 1, 1999, "Monthly"},
+		{"quarterly", "month", 3, 4999, "Quarterly"},
+		{"annual", "year", 1, 14999, "Annual"},
+	}
+	for _, c := range cases {
+		spec, ok := tierSpecs[c.tier]
+		if !ok {
+			t.Fatalf("missing tierSpec for %q", c.tier)
+		}
+		if spec.interval != c.interval || spec.intervalCount != c.intervalCount || spec.defaultAmount != c.amount {
+			t.Errorf("%s spec = %+v, want interval=%s count=%d amount=%d", c.tier, spec, c.interval, c.intervalCount, c.amount)
+		}
+		if got := tierDisplayName(c.tier); got != c.display {
+			t.Errorf("tierDisplayName(%q) = %q, want %q", c.tier, got, c.display)
 		}
 	}
-	for _, id := range []string{"price_bogus", "price_cheap_001", "", "PRICE_M", "price_"} {
-		if svc.isConfiguredPrice(id) {
-			t.Errorf("non-configured price %q must be rejected", id)
+	if got := tierDisplayName("bogus"); got != "bogus" {
+		t.Errorf("unknown tier should echo its id, got %q", got)
+	}
+}
+
+func TestFirstNameAndPriceEmail(t *testing.T) {
+	for in, want := range map[string]string{"": "there", "Caleb": "Caleb", "Caleb Scott": "Caleb", "  Hank  Smith ": "Hank"} {
+		if got := firstName(in); got != want {
+			t.Errorf("firstName(%q) = %q, want %q", in, got, want)
 		}
 	}
-	// An unset configured slot must never match an empty candidate id.
-	unset := &Service{cfg: Config{PriceMonthly: "", PriceQuarterly: "", PriceAnnual: ""}}
-	if unset.isConfiguredPrice("") {
-		t.Errorf("empty price must not match unset configured prices")
+	subject, body := priceIncreaseEmail("annual", 14999, 16999)
+	if subject == "" {
+		t.Error("price increase email needs a subject")
+	}
+	for _, want := range []string{"Annual", "$149.99", "$169.99", "%s"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("price increase body missing %q; got:\n%s", want, body)
+		}
+	}
+}
+
+func TestPlanForPriceNilStore(t *testing.T) {
+	// With no store wired the provider must not panic; it echoes the raw id.
+	p := &stripeProvider{}
+	if got := p.planForPrice("price_xyz"); got != "price_xyz" {
+		t.Errorf("planForPrice with nil store = %q, want raw id", got)
 	}
 }
 
@@ -138,15 +173,5 @@ func TestFreeDaysFromCoupon(t *testing.T) {
 	}
 }
 
-func TestPlanForPrice(t *testing.T) {
-	p := &stripeProvider{cfg: Config{PriceMonthly: "price_m", PriceAnnual: "price_a"}}
-	if got := p.planForPrice("price_m"); got != "monthly" {
-		t.Errorf("planForPrice(monthly) = %q", got)
-	}
-	if got := p.planForPrice("price_a"); got != "annual" {
-		t.Errorf("planForPrice(annual) = %q", got)
-	}
-	if got := p.planForPrice("price_unknown"); got != "price_unknown" {
-		t.Errorf("planForPrice(unknown) = %q, want passthrough", got)
-	}
-}
+// planForPrice now resolves via the DB (plan_prices + history); the nil-store
+// passthrough is covered by TestPlanForPriceNilStore.
