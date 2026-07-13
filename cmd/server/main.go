@@ -111,6 +111,8 @@ func main() {
 	// Public routes
 	api.HandleFunc("/auth/register", authHandler.Register).Methods("POST")
 	api.HandleFunc("/auth/login", authHandler.Login).Methods("POST")
+	api.HandleFunc("/auth/forgot-password", authHandler.ForgotPassword).Methods("POST")
+	api.HandleFunc("/auth/reset-password", authHandler.ResetPassword).Methods("POST")
 
 	// Stripe webhook — PUBLIC by necessity: Stripe cannot present a bearer token,
 	// so it is mounted OUTSIDE AuthMiddleware. The request is authenticated by the
