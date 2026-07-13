@@ -111,6 +111,18 @@
         {
           "name": "JWT_SECRET",
           "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/prod/JWT_SECRET"
+        },
+        {
+          "name": "STRIPE_SECRET_KEY",
+          "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/prod/STRIPE_SECRET_KEY"
+        },
+        {
+          "name": "STRIPE_PUBLISHABLE_KEY",
+          "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/prod/STRIPE_PUBLISHABLE_KEY"
+        },
+        {
+          "name": "STRIPE_WEBHOOK_SECRET",
+          "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/prod/STRIPE_WEBHOOK_SECRET"
         }
       ],
       "logConfiguration": {
