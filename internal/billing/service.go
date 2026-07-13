@@ -1,6 +1,7 @@
 package billing
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -148,9 +149,28 @@ func (s *Service) Subscribe(userID int64, req models.SubscribeRequest) (*models.
 		return nil, err
 	}
 
-	clientSecret, subID, err := s.stripe.CreateSubscription(customerID, req.PriceID, req.PromotionCode, s.cfg.TrialDays)
+	// A "free_days" promo code is a local trial offer (a bounded trial), NOT a
+	// Stripe discount coupon. If the code matches one, apply it as trial days and
+	// don't forward it to Stripe as a discount.
+	trialDays := s.cfg.TrialDays
+	stripePromo := req.PromotionCode
+	trialCode := ""
+	if req.PromotionCode != "" {
+		if offer, oerr := s.store.GetRedeemableTrialOffer(req.PromotionCode); oerr == nil && offer != nil {
+			trialDays = offer.FreeDays
+			stripePromo = ""
+			trialCode = offer.Code
+		}
+	}
+
+	clientSecret, mode, subID, err := s.stripe.CreateSubscription(customerID, req.PriceID, stripePromo, trialDays)
 	if err != nil {
 		return nil, err
+	}
+	if trialCode != "" {
+		if ierr := s.store.IncrementTrialRedemption(trialCode); ierr != nil {
+			log.Printf("[billing] could not record trial redemption for %s: %v", trialCode, ierr)
+		}
 	}
 
 	// Persist an initial local mirror; the webhook will reconcile the canonical
@@ -163,7 +183,7 @@ func (s *Service) Subscribe(userID int64, req models.SubscribeRequest) (*models.
 		}
 	}
 
-	return &models.SubscribeResponse{ClientSecret: clientSecret, SubscriptionID: subID}, nil
+	return &models.SubscribeResponse{ClientSecret: clientSecret, SubscriptionID: subID, Mode: mode}, nil
 }
 
 // ApplyCoupon previews a promotion code for the client.
@@ -173,6 +193,14 @@ func (s *Service) ApplyCoupon(code string) (*models.ApplyCouponResponse, error) 
 	}
 	if code == "" {
 		return nil, errors.New("code is required")
+	}
+	// A free-days (trial) code is local, not a Stripe promotion code.
+	if offer, oerr := s.store.GetRedeemableTrialOffer(code); oerr == nil && offer != nil {
+		return &models.ApplyCouponResponse{
+			Valid:       true,
+			Description: fmt.Sprintf("%d days free", offer.FreeDays),
+			FreeDays:    offer.FreeDays,
+		}, nil
 	}
 	resp, err := s.stripe.LookupPromotion(code)
 	if errors.Is(err, ErrPromotionNotFound) {
@@ -251,14 +279,81 @@ func (s *Service) CreateOffer(req models.CreateCouponRequest) (*models.CreateCou
 	if !s.Enabled() {
 		return nil, ErrBillingDisabled
 	}
+	// "free_days" is a bounded TRIAL, not a Stripe discount coupon (a coupon
+	// would waive a whole billing period). Store it locally and apply it as
+	// trial_period_days at subscribe time.
+	if req.Type == "free_days" {
+		return s.createTrialOffer(req)
+	}
 	return s.stripe.CreateOffer(req)
+}
+
+func (s *Service) createTrialOffer(req models.CreateCouponRequest) (*models.CreateCouponResponse, error) {
+	if req.Value <= 0 || req.Value > 365 {
+		return nil, errors.New("free_days must be between 1 and 365")
+	}
+	code := generatePromoCode()
+	var maxR *int
+	if req.MaxRedemptions != nil {
+		v := int(*req.MaxRedemptions)
+		maxR = &v
+	}
+	offer := models.TrialOffer{
+		Code:           code,
+		FreeDays:       int(req.Value),
+		Name:           req.Name,
+		MaxRedemptions: maxR,
+		ExpiresAt:      req.ExpiresAt,
+	}
+	if err := s.store.CreateTrialOffer(offer); err != nil {
+		return nil, err
+	}
+	return &models.CreateCouponResponse{Code: code, CouponID: "trial:" + code}, nil
 }
 
 func (s *Service) ListOffers() ([]models.CouponOffer, error) {
 	if !s.Enabled() {
 		return nil, ErrBillingDisabled
 	}
-	return s.stripe.ListOffers()
+	offers, err := s.stripe.ListOffers()
+	if err != nil {
+		return nil, err
+	}
+	// Merge in the local free-days (trial) offers so the admin sees all codes.
+	if trials, terr := s.store.ListTrialOffers(); terr == nil {
+		for _, t := range trials {
+			co := models.CouponOffer{
+				Code:          t.Code,
+				CouponID:      "trial:" + t.Code,
+				Name:          t.Name,
+				Type:          "free_days",
+				FreeDays:      t.FreeDays,
+				TimesRedeemed: int64(t.RedeemedCount),
+				Active:        t.Active,
+				ExpiresAt:     t.ExpiresAt,
+			}
+			if t.MaxRedemptions != nil {
+				co.MaxRedemptions = int64(*t.MaxRedemptions)
+			}
+			offers = append(offers, co)
+		}
+	}
+	return offers, nil
+}
+
+// generatePromoCode returns a readable random code (no ambiguous characters).
+func generatePromoCode() string {
+	const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	b := make([]byte, 10)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand should not fail; fall back to a time-independent constant
+		// prefix so the DB PK still applies uniqueness (caller can retry).
+		return "FREEDAYS00"
+	}
+	for i := range b {
+		b[i] = chars[int(b[i])%len(chars)]
+	}
+	return string(b)
 }
 
 // Comp grants or revokes a manual comp for a user. This works even when Stripe is

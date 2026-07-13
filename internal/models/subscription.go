@@ -97,6 +97,23 @@ type SubscribeRequest struct {
 type SubscribeResponse struct {
 	ClientSecret   string `json:"client_secret"`
 	SubscriptionID string `json:"subscription_id"`
+	// Mode tells the client which kind of Stripe intent client_secret is for:
+	// "payment" (charge now) or "setup" (collect a card for a free-days trial
+	// that converts when the trial ends). Empty when no client action is needed.
+	Mode string `json:"mode"`
+}
+
+// TrialOffer is an admin-issued "N free days" promo code — a bounded trial, not
+// a Stripe discount coupon.
+type TrialOffer struct {
+	Code           string     `json:"code"`
+	FreeDays       int        `json:"free_days"`
+	Name           string     `json:"name"`
+	MaxRedemptions *int       `json:"max_redemptions,omitempty"`
+	RedeemedCount  int        `json:"redeemed_count"`
+	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
+	Active         bool       `json:"active"`
+	CreatedAt      time.Time  `json:"created_at"`
 }
 
 type ApplyCouponRequest struct {

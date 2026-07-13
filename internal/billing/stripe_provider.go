@@ -70,7 +70,7 @@ func (p *stripeProvider) EnsureCustomer(existingID, email, name string, userID i
 // the Stripe Payment Sheet. payment_behavior=default_incomplete + expanding
 // latest_invoice.payment_intent is the SDK-recommended in-app flow: the card is
 // entered client-side and the raw PAN never reaches this server.
-func (p *stripeProvider) CreateSubscription(customerID, priceID, promotionCode string, trialDays int) (clientSecret, subscriptionID string, err error) {
+func (p *stripeProvider) CreateSubscription(customerID, priceID, promotionCode string, trialDays int) (clientSecret, mode, subscriptionID string, err error) {
 	params := &stripe.SubscriptionParams{
 		Customer: stripe.String(customerID),
 		Items: []*stripe.SubscriptionItemsParams{
@@ -78,32 +78,49 @@ func (p *stripeProvider) CreateSubscription(customerID, priceID, promotionCode s
 		},
 		PaymentBehavior: stripe.String("default_incomplete"),
 	}
-	if trialDays > 0 {
+	trial := trialDays > 0
+	if trial {
 		params.TrialPeriodDays = stripe.Int64(int64(trialDays))
+		// Require a card on file for the trial; if none is added by trial end,
+		// cancel (no surprise charge) rather than leaving the sub stuck.
+		params.TrialSettings = &stripe.SubscriptionTrialSettingsParams{
+			EndBehavior: &stripe.SubscriptionTrialSettingsEndBehaviorParams{
+				MissingPaymentMethod: stripe.String("cancel"),
+			},
+		}
 	}
 	if promotionCode != "" {
-		// Resolve the customer-facing code to a promotion code id.
 		promoID, perr := p.resolvePromotionID(promotionCode)
 		if perr != nil {
-			return "", "", perr
+			return "", "", "", perr
 		}
 		params.Discounts = []*stripe.SubscriptionDiscountParams{
 			{PromotionCode: stripe.String(promoID)},
 		}
 	}
-	params.AddExpand("latest_invoice.payment_intent")
+	if trial {
+		// A trial doesn't charge now; collect a card via the SetupIntent so the
+		// sub converts when the trial ends.
+		params.AddExpand("pending_setup_intent")
+	} else {
+		params.AddExpand("latest_invoice.payment_intent")
+	}
 
 	sub, err := subscription.New(params)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 
-	// With a trial the first invoice may not require immediate payment, so a
-	// PaymentIntent (and thus client secret) may be absent — that is expected.
-	if sub.LatestInvoice != nil && sub.LatestInvoice.PaymentIntent != nil {
-		clientSecret = sub.LatestInvoice.PaymentIntent.ClientSecret
+	if trial {
+		if sub.PendingSetupIntent != nil {
+			return sub.PendingSetupIntent.ClientSecret, "setup", sub.ID, nil
+		}
+		return "", "setup", sub.ID, nil
 	}
-	return clientSecret, sub.ID, nil
+	if sub.LatestInvoice != nil && sub.LatestInvoice.PaymentIntent != nil {
+		return sub.LatestInvoice.PaymentIntent.ClientSecret, "payment", sub.ID, nil
+	}
+	return "", "payment", sub.ID, nil
 }
 
 // CancelAtPeriodEnd flags the subscription to cancel at the end of the current
