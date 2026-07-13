@@ -93,6 +93,14 @@
         {
           "name": "TRIAL_DAYS",
           "value": "0"
+        },
+        {
+          "name": "EMAIL_SMTP_HOST",
+          "value": "email-smtp.us-east-1.amazonaws.com:587"
+        },
+        {
+          "name": "EMAIL_FROM",
+          "value": "noreply@scoreright.app"
         }
       ],
       "secrets": [
@@ -123,6 +131,14 @@
         {
           "name": "STRIPE_WEBHOOK_SECRET",
           "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/prod/STRIPE_WEBHOOK_SECRET"
+        },
+        {
+          "name": "EMAIL_SMTP_USER",
+          "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/prod/EMAIL_SMTP_USER"
+        },
+        {
+          "name": "EMAIL_SMTP_PASS",
+          "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/prod/EMAIL_SMTP_PASS"
         }
       ],
       "logConfiguration": {
