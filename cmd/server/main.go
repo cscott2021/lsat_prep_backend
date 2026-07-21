@@ -92,6 +92,10 @@ func main() {
 	billingStore := billing.NewStore(db)
 	billingService := billing.NewService(billingCfg, billingStore)
 	billingHandler := billing.NewHandler(billingService)
+	// Wire the metered-free-tier counter (rolling 24h answered count) so the
+	// paywall can meter non-entitled users and /billing/subscription can report
+	// usage. The questions store satisfies billing.FreeQuotaCounter.
+	billingService.SetFreeQuotaCounter(questionStore)
 
 	// Start background workers
 	ctx, cancel := context.WithCancel(context.Background())
@@ -134,23 +138,33 @@ func main() {
 	// (a non-subscriber must be able to see plans and subscribe).
 	billingHandler.RegisterRoutes(protected)
 
-	// Entitlement-gated core practice endpoints. The drill + question-generation
-	// routes consume paid resources (LLM generation), so they sit behind
-	// RequireEntitlement (HTTP 402 for non-entitled users) IN ADDITION to
-	// AuthMiddleware. Admins, comped, trialing and active users pass; when
-	// billing is unconfigured the gate is open (see billing.RequireEntitlement).
+	// Entitlement-gated core practice endpoints. These consume paid resources (LLM
+	// generation), so they sit behind a billing gate IN ADDITION to AuthMiddleware.
 	//
-	// This subrouter is created before the parameterized /questions/{id} route so
-	// its fixed drill paths are matched first (gorilla/mux matches in
-	// registration order). To change what is gated, move a route between the
-	// `entitled` subrouter and `protected`.
+	// Two tiers of gating:
+	//   - /questions/generate stays PREMIUM-ONLY via RequireEntitlement (402
+	//     subscription_required for non-entitled users) — it is the raw
+	//     batch-generation endpoint.
+	//   - The four DRILL endpoints use RequireEntitlementOrFreeQuota: entitled
+	//     users pass unlimited; non-entitled users get a metered free tier
+	//     (freeTierLimit questions / rolling 24h, then 402 free_limit_reached).
+	//     The middleware records the remaining allowance in the request context so
+	//     the drill handlers clamp how many questions a free user is served.
+	//
+	// When billing is unconfigured both gates fail open (see the billing
+	// middlewares). Both subrouters are created before the parameterized
+	// /questions/{id} route so their fixed paths match first (gorilla/mux matches
+	// in registration order).
 	entitled := protected.PathPrefix("").Subrouter()
 	entitled.Use(billing.RequireEntitlement(billingService))
 	entitled.HandleFunc("/questions/generate", questionHandler.GenerateBatch).Methods("POST")
-	entitled.HandleFunc("/questions/quick-drill", questionHandler.QuickDrill).Methods("POST")
-	entitled.HandleFunc("/questions/subtype-drill", questionHandler.SubtypeDrill).Methods("POST")
-	entitled.HandleFunc("/questions/rc-drill", questionHandler.RCDrill).Methods("POST")
-	entitled.HandleFunc("/questions/similar-drill", questionHandler.SimilarDrill).Methods("POST")
+
+	metered := protected.PathPrefix("").Subrouter()
+	metered.Use(billing.RequireEntitlementOrFreeQuota(billingService, questionStore))
+	metered.HandleFunc("/questions/quick-drill", questionHandler.QuickDrill).Methods("POST")
+	metered.HandleFunc("/questions/subtype-drill", questionHandler.SubtypeDrill).Methods("POST")
+	metered.HandleFunc("/questions/rc-drill", questionHandler.RCDrill).Methods("POST")
+	metered.HandleFunc("/questions/similar-drill", questionHandler.SimilarDrill).Methods("POST")
 
 	// Remaining question endpoints (fixed paths before parameterized). Left OPEN
 	// so an in-progress drill, history review and answer submission keep working

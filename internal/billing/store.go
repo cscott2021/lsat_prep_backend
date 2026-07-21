@@ -55,6 +55,16 @@ func (s *Store) GetUserContact(userID int64) (email, name string, err error) {
 	return email, name, err
 }
 
+// GetUserCreatedAt returns when the user's account was created. Used to evaluate
+// founding-member eligibility (the account must fall inside the launch window).
+func (s *Store) GetUserCreatedAt(userID int64) (time.Time, error) {
+	var createdAt time.Time
+	err := s.db.QueryRow(
+		`SELECT created_at FROM users WHERE id = $1`, userID,
+	).Scan(&createdAt)
+	return createdAt, err
+}
+
 // GetByUserID returns a user's subscription, or (nil, nil) if none exists.
 func (s *Store) GetByUserID(userID int64) (*models.Subscription, error) {
 	return s.scanOne(

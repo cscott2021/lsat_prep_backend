@@ -25,6 +25,33 @@ func getUserID(r *http.Request) (int64, bool) {
 	return uid, ok
 }
 
+// freeQuotaRemaining reads the caller's remaining metered free-tier allowance,
+// set by billing.RequireEntitlementOrFreeQuota. It returns -1 (unlimited) when
+// the value is absent (e.g. an entitled route or billing disabled).
+func freeQuotaRemaining(r *http.Request) int {
+	if v, ok := r.Context().Value(models.FreeQuotaRemainingKey).(int); ok {
+		return v
+	}
+	return -1
+}
+
+// clampToFreeQuota reduces a requested question count to the caller's remaining
+// free-tier allowance so a free user can never be served more than they have
+// left. A remaining value of -1 means unlimited (entitled/admin/billing-disabled)
+// and the requested count is returned unchanged. For a free user, the effective
+// count is capped at the allowance (and defaults to the full allowance when the
+// request did not specify a positive count).
+func clampToFreeQuota(r *http.Request, requested int) int {
+	remaining := freeQuotaRemaining(r)
+	if remaining < 0 {
+		return requested
+	}
+	if requested <= 0 || requested > remaining {
+		return remaining
+	}
+	return requested
+}
+
 func (h *Handler) GenerateBatch(w http.ResponseWriter, r *http.Request) {
 	var req models.GenerateBatchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -254,6 +281,9 @@ func (h *Handler) QuickDrill(w http.ResponseWriter, r *http.Request) {
 	if req.Count > 50 {
 		req.Count = 50
 	}
+	// Metered free tier: never serve a free user more than their remaining
+	// allowance (no-op for entitled users, where remaining is unlimited).
+	req.Count = clampToFreeQuota(r, req.Count)
 
 	questions, err := h.service.GetQuickDrill(r.Context(), userID, req)
 	if err != nil {
@@ -318,6 +348,8 @@ func (h *Handler) SubtypeDrill(w http.ResponseWriter, r *http.Request) {
 	if req.Count > 50 {
 		req.Count = 50
 	}
+	// Metered free tier: cap to the free user's remaining allowance.
+	req.Count = clampToFreeQuota(r, req.Count)
 
 	questions, err := h.service.GetSubtypeDrill(r.Context(), userID, req)
 	if err != nil {
@@ -449,6 +481,8 @@ func (h *Handler) RCDrill(w http.ResponseWriter, r *http.Request) {
 	if req.Count > 50 {
 		req.Count = 50
 	}
+	// Metered free tier: cap to the free user's remaining allowance.
+	req.Count = clampToFreeQuota(r, req.Count)
 
 	resp, err := h.service.GetRCDrill(r.Context(), userID, req)
 	if err != nil {
@@ -512,6 +546,11 @@ func (h *Handler) SimilarDrill(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// Metered free tier: cap to the free user's remaining allowance. Similar-drill
+	// defaults/caps count inside the service, so clamp the requested value here
+	// (0 → the full remaining allowance for a free user; unchanged when unlimited).
+	req.Count = clampToFreeQuota(r, req.Count)
 
 	questions, err := h.service.GetSimilarDrill(userID, req)
 	if err != nil {
