@@ -84,6 +84,32 @@ type SubscriptionResponse struct {
 	CancelAtPeriodEnd bool       `json:"cancel_at_period_end"`
 	TrialEnd          *time.Time `json:"trial_end"`
 	Entitled          bool       `json:"entitled"`
+	// FreeQuota reports the metered free-tier usage for a NON-entitled user. It is
+	// null for entitled users (they have no quota) and when the free tier is not
+	// enforced (billing disabled → paywall open).
+	FreeQuota *FreeQuotaStatus `json:"free_quota"`
+	// FoundingOffer is the launch-window promo the user is eligible for, or null.
+	FoundingOffer *FoundingOffer `json:"founding_offer"`
+}
+
+// FreeQuotaStatus reports a non-entitled user's metered free-tier usage. Used is
+// the number of questions answered in the rolling 24h window; ResetAt is when
+// the OLDEST answer in that window ages out (null when nothing has been used).
+type FreeQuotaStatus struct {
+	Used    int        `json:"used"`
+	Limit   int        `json:"limit"`
+	ResetAt *time.Time `json:"reset_at"`
+}
+
+// FoundingOffer describes the founding-member launch promo surfaced on GET
+// /billing/subscription. It is only ever emitted when the user is eligible (the
+// account was created inside the launch window), so Eligible is always true when
+// the object is present; the field is null otherwise.
+type FoundingOffer struct {
+	Eligible   bool      `json:"eligible"`
+	PercentOff int       `json:"percent_off"`
+	Months     int       `json:"months"`
+	EndsAt     time.Time `json:"ends_at"`
 }
 
 type SubscribeRequest struct {

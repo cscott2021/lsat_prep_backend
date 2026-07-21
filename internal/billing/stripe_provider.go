@@ -2,6 +2,7 @@ package billing
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	stripe "github.com/stripe/stripe-go/v81"
@@ -298,6 +299,67 @@ func (p *stripeProvider) CreateOffer(req models.CreateCouponRequest) (*models.Cr
 	}
 
 	return &models.CreateCouponResponse{Code: pc.Code, CouponID: cp.ID}, nil
+}
+
+// EnsureFoundingCoupon idempotently provisions the founding-member launch promo:
+// a percent_off=50, duration=repeating, duration_in_months=3 coupon (keyed by the
+// fixed id foundingCouponID) and a redeemable promotion code (foundingPromoCode).
+// Safe to call repeatedly — it looks up each object first and only creates what
+// is missing, so it never spawns duplicates across restarts.
+func (p *stripeProvider) EnsureFoundingCoupon() error {
+	// Coupon: look up by fixed id; create only if missing.
+	if _, err := coupon.Get(foundingCouponID, nil); err != nil {
+		if !isStripeNotFound(err) {
+			return fmt.Errorf("get founding coupon: %w", err)
+		}
+		_, cerr := coupon.New(&stripe.CouponParams{
+			ID:               stripe.String(foundingCouponID),
+			Name:             stripe.String("Founding Member — 50% off for 3 months"),
+			PercentOff:       stripe.Float64(foundingPercentOff),
+			Duration:         stripe.String(string(stripe.CouponDurationRepeating)),
+			DurationInMonths: stripe.Int64(foundingDurationMonths),
+		})
+		// A concurrent boot may have created it between our Get and New; treat an
+		// "already exists" as success rather than an error.
+		if cerr != nil && !isStripeAlreadyExists(cerr) {
+			return fmt.Errorf("create founding coupon: %w", cerr)
+		}
+	}
+
+	// Promotion code: reuse the existing active code if present.
+	if _, err := p.findPromotion(foundingPromoCode); err == nil {
+		return nil
+	} else if !errors.Is(err, ErrPromotionNotFound) {
+		return fmt.Errorf("look up founding promo code: %w", err)
+	}
+	if _, err := promotioncode.New(&stripe.PromotionCodeParams{
+		Coupon: stripe.String(foundingCouponID),
+		Code:   stripe.String(foundingPromoCode),
+	}); err != nil && !isStripeAlreadyExists(err) {
+		return fmt.Errorf("create founding promo code: %w", err)
+	}
+	return nil
+}
+
+// isStripeNotFound reports whether err is a Stripe "resource_missing" (404),
+// distinguishing a genuinely-absent object from a transient/API error.
+func isStripeNotFound(err error) bool {
+	var se *stripe.Error
+	if errors.As(err, &se) {
+		return se.Code == stripe.ErrorCodeResourceMissing || se.HTTPStatusCode == 404
+	}
+	return false
+}
+
+// isStripeAlreadyExists reports whether err is a Stripe "resource_already_exists"
+// conflict — used so idempotent provisioning treats a race with a concurrent
+// creator as success.
+func isStripeAlreadyExists(err error) bool {
+	var se *stripe.Error
+	if errors.As(err, &se) {
+		return se.Code == stripe.ErrorCodeResourceAlreadyExists
+	}
+	return false
 }
 
 // ListOffers returns active promotion codes with their live redemption counts.

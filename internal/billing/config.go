@@ -3,6 +3,7 @@ package billing
 import (
 	"os"
 	"strconv"
+	"time"
 )
 
 // defaultTrialDays is used when TRIAL_DAYS is unset or unparseable.
@@ -25,6 +26,10 @@ type Config struct {
 	PriceAnnual    string
 	AppBaseURL     string
 	TrialDays      int
+	// FoundingLaunchDate anchors the founding-member promo window. When nil the
+	// feature is DISABLED (no founding_offer is ever surfaced and Subscribe never
+	// auto-applies the founding code). Sourced from FOUNDING_LAUNCH_DATE.
+	FoundingLaunchDate *time.Time
 }
 
 // LoadConfig reads billing configuration from the environment. It never fails:
@@ -38,15 +43,33 @@ func LoadConfig() Config {
 	}
 
 	return Config{
-		SecretKey:      os.Getenv("STRIPE_SECRET_KEY"),
-		WebhookSecret:  os.Getenv("STRIPE_WEBHOOK_SECRET"),
-		PublishableKey: os.Getenv("STRIPE_PUBLISHABLE_KEY"),
-		PriceMonthly:   os.Getenv("STRIPE_PRICE_MONTHLY"),
-		PriceQuarterly: os.Getenv("STRIPE_PRICE_QUARTERLY"),
-		PriceAnnual:    os.Getenv("STRIPE_PRICE_ANNUAL"),
-		AppBaseURL:     os.Getenv("APP_BASE_URL"),
-		TrialDays:      trialDays,
+		SecretKey:          os.Getenv("STRIPE_SECRET_KEY"),
+		WebhookSecret:      os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		PublishableKey:     os.Getenv("STRIPE_PUBLISHABLE_KEY"),
+		PriceMonthly:       os.Getenv("STRIPE_PRICE_MONTHLY"),
+		PriceQuarterly:     os.Getenv("STRIPE_PRICE_QUARTERLY"),
+		PriceAnnual:        os.Getenv("STRIPE_PRICE_ANNUAL"),
+		AppBaseURL:         os.Getenv("APP_BASE_URL"),
+		TrialDays:          trialDays,
+		FoundingLaunchDate: parseFoundingLaunchDate(os.Getenv("FOUNDING_LAUNCH_DATE")),
 	}
+}
+
+// parseFoundingLaunchDate parses FOUNDING_LAUNCH_DATE, accepting either a full
+// RFC3339 timestamp ("2026-07-01T00:00:00Z") or a bare date ("2026-07-01",
+// interpreted as midnight UTC). Returns nil for an empty or unparseable value so
+// a misconfiguration disables the promo (LoadConfig never fails).
+func parseFoundingLaunchDate(v string) *time.Time {
+	if v == "" {
+		return nil
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02"} {
+		if t, err := time.Parse(layout, v); err == nil {
+			u := t.UTC()
+			return &u
+		}
+	}
+	return nil
 }
 
 // Enabled reports whether Stripe billing is fully configured. Both the secret
