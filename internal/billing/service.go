@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync/atomic"
+	"time"
 
 	stripe "github.com/stripe/stripe-go/v81"
 
@@ -23,6 +25,14 @@ type Service struct {
 	cfg    Config
 	store  *Store
 	stripe *stripeProvider
+	// quota reports rolling-24h answered counts for the metered free tier. Wired
+	// after construction via SetFreeQuotaCounter (the questions store). May be nil
+	// (e.g. in tests), in which case free-tier usage is simply not reported.
+	quota FreeQuotaCounter
+	// foundingReady short-circuits the lazy EnsureFoundingCoupon call once the
+	// Stripe coupon + promotion code are confirmed to exist, so we don't hit the
+	// Stripe API on every founding subscribe.
+	foundingReady atomic.Bool
 }
 
 // NewService builds the billing service. If cfg.Enabled() is false the Stripe
@@ -42,6 +52,12 @@ func (s *Service) Enabled() bool           { return s.cfg.Enabled() }
 func (s *Service) WebhookConfigured() bool { return s.cfg.WebhookConfigured() }
 func (s *Service) Config() Config          { return s.cfg }
 func (s *Service) Store() *Store           { return s.store }
+
+// SetFreeQuotaCounter wires the metered-free-tier counter (the questions store).
+// Wired after construction because the questions store and the billing service
+// are built independently in main; safe to leave unset (usage just isn't
+// reported and the paywall middleware falls back to a retryable 503).
+func (s *Service) SetFreeQuotaCounter(c FreeQuotaCounter) { s.quota = c }
 
 // GetEntitlement resolves a user's access decision (derived from status/admin).
 func (s *Service) GetEntitlement(userID int64) (Entitlement, error) {
@@ -108,7 +124,39 @@ func (s *Service) GetSubscriptionResponse(userID int64) (*models.SubscriptionRes
 		resp.CancelAtPeriodEnd = sub.CancelAtPeriodEnd
 		resp.TrialEnd = sub.TrialEnd
 	}
+
+	// Free-tier usage + founding offer are only meaningful when billing is
+	// enforced. When billing is disabled the paywall is open (everyone has
+	// unlimited access and nothing is purchasable), so both stay null to avoid
+	// misrepresenting the user's real state.
+	if s.Enabled() {
+		if !ent.Entitled {
+			resp.FreeQuota = s.freeQuotaStatus(userID)
+		}
+		resp.FoundingOffer = s.foundingOfferFor(userID)
+	}
 	return resp, nil
+}
+
+// freeQuotaStatus builds the metered free-tier usage block for a non-entitled
+// user. Returns a zero-usage status (reset_at null) if the counter is unwired or
+// errors, so a transient counter failure never breaks the subscription view.
+func (s *Service) freeQuotaStatus(userID int64) *models.FreeQuotaStatus {
+	fq := &models.FreeQuotaStatus{Used: 0, Limit: freeTierLimit}
+	if s.quota == nil {
+		return fq
+	}
+	count, oldest, err := s.quota.CountAnsweredLast24h(userID)
+	if err != nil {
+		log.Printf("[billing] free-quota status count failed for user %d: %v", userID, err)
+		return fq
+	}
+	fq.Used = count
+	if count > 0 && oldest != nil {
+		reset := oldest.Add(24 * time.Hour)
+		fq.ResetAt = &reset
+	}
+	return fq
 }
 
 // isConfiguredPrice reports whether priceID is a currently-active plan price
@@ -160,6 +208,17 @@ func (s *Service) Subscribe(userID int64, req models.SubscribeRequest) (*models.
 			trialDays = offer.FreeDays
 			stripePromo = ""
 			trialCode = offer.Code
+		}
+	} else if s.isFoundingEligible(userID) {
+		// No client-supplied code + founding-eligible: auto-apply the founding
+		// promotion code SERVER-SIDE (eligibility is computed from users.created_at
+		// here — a client-supplied "founding" flag is never trusted). Best-effort:
+		// if the coupon can't be ensured, subscribe at full price rather than
+		// blocking the sale (never let a paying user get stuck).
+		if err := s.ensureFoundingCoupon(); err != nil {
+			log.Printf("[billing] founding coupon unavailable; subscribing user %d without discount: %v", userID, err)
+		} else {
+			stripePromo = foundingPromoCode
 		}
 	}
 
@@ -354,6 +413,82 @@ func generatePromoCode() string {
 		b[i] = chars[int(b[i])%len(chars)]
 	}
 	return string(b)
+}
+
+// ── Founding-member launch promo ──────────────────────────
+
+const (
+	// foundingCouponID is the fixed, human-stable Stripe coupon id so
+	// EnsureFoundingCoupon is idempotent (we look it up by this id rather than
+	// creating a new random coupon each boot).
+	foundingCouponID = "founding50_3mo"
+	// foundingPromoCode is the redeemable promotion code applied to the
+	// subscription (customers never type it — it is applied server-side).
+	foundingPromoCode = "FOUNDING"
+	// foundingPercentOff / foundingDurationMonths define the discount: 50% off for
+	// the first 3 billing months (duration=repeating).
+	foundingPercentOff     = 50
+	foundingDurationMonths = 3
+	// foundingWindowDays is how long after launch an account may be created and
+	// still qualify as a founding member.
+	foundingWindowDays = 14
+)
+
+// foundingWindow returns the [launch, ends] eligibility window and whether the
+// feature is configured (FOUNDING_LAUNCH_DATE set).
+func (s *Service) foundingWindow() (launch, ends time.Time, ok bool) {
+	if s.cfg.FoundingLaunchDate == nil {
+		return time.Time{}, time.Time{}, false
+	}
+	launch = *s.cfg.FoundingLaunchDate
+	ends = launch.Add(foundingWindowDays * 24 * time.Hour)
+	return launch, ends, true
+}
+
+// isFoundingEligible reports whether the user's account was created inside the
+// founding window [LAUNCH_DATE, LAUNCH_DATE + 14d] (inclusive). Computed purely
+// server-side from users.created_at.
+func (s *Service) isFoundingEligible(userID int64) bool {
+	launch, ends, ok := s.foundingWindow()
+	if !ok {
+		return false
+	}
+	createdAt, err := s.store.GetUserCreatedAt(userID)
+	if err != nil {
+		log.Printf("[billing] founding eligibility: could not load created_at for user %d: %v", userID, err)
+		return false
+	}
+	return !createdAt.Before(launch) && !createdAt.After(ends)
+}
+
+// foundingOfferFor builds the founding_offer block for GET /billing/subscription,
+// or nil when the feature is unconfigured or the user is outside the window.
+func (s *Service) foundingOfferFor(userID int64) *models.FoundingOffer {
+	_, ends, ok := s.foundingWindow()
+	if !ok || !s.isFoundingEligible(userID) {
+		return nil
+	}
+	return &models.FoundingOffer{
+		Eligible:   true,
+		PercentOff: foundingPercentOff,
+		Months:     foundingDurationMonths,
+		EndsAt:     ends,
+	}
+}
+
+// ensureFoundingCoupon lazily creates the founding coupon + promotion code the
+// first time it is needed, then short-circuits once confirmed present. It retries
+// on failure (foundingReady flips only on success) so a transient Stripe error
+// doesn't permanently disable the promo.
+func (s *Service) ensureFoundingCoupon() error {
+	if s.foundingReady.Load() {
+		return nil
+	}
+	if err := s.stripe.EnsureFoundingCoupon(); err != nil {
+		return err
+	}
+	s.foundingReady.Store(true)
+	return nil
 }
 
 // Comp grants or revokes a manual comp for a user. This works even when Stripe is

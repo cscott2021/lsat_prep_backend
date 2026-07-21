@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/lsat-prep/backend/internal/generator"
 	"github.com/lsat-prep/backend/internal/models"
@@ -421,6 +422,31 @@ func (s *Store) RecordAnswer(userID, questionID int64, correct bool, selectedCho
 		return false, err
 	}
 	return attemptCount == 1, nil
+}
+
+// CountAnsweredLast24h returns how many questions the user has answered in the
+// rolling last 24 hours, plus the OLDEST answered_at within that window (nil when
+// the count is zero). It powers the metered free tier: the paywall meters on the
+// count, and reset_at is derived from oldest + 24h. Backed by the
+// idx_history_user_date (user_id, answered_at) index.
+func (s *Store) CountAnsweredLast24h(userID int64) (int, *time.Time, error) {
+	var count int
+	var oldest sql.NullTime
+	err := s.db.QueryRow(
+		`SELECT COUNT(*), MIN(answered_at)
+		   FROM user_question_history
+		  WHERE user_id = $1
+		    AND answered_at > NOW() - INTERVAL '24 hours'`,
+		userID,
+	).Scan(&count, &oldest)
+	if err != nil {
+		return 0, nil, err
+	}
+	if oldest.Valid {
+		t := oldest.Time.UTC()
+		return count, &t, nil
+	}
+	return count, nil, nil
 }
 
 // CountUnseenForUser counts servable questions in a section+subtype that the
