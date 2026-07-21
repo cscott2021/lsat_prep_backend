@@ -92,7 +92,11 @@
         },
         {
           "name": "TRIAL_DAYS",
-          "value": "0"
+          "value": "7"
+        },
+        {
+          "name": "FOUNDING_LAUNCH_DATE",
+          "value": "2026-07-21"
         },
         {
           "name": "EMAIL_SMTP_HOST",
