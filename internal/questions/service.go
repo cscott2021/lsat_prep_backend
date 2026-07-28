@@ -2,6 +2,7 @@ package questions
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -38,7 +39,11 @@ type Service struct {
 	autoGenEnabledRC   bool
 	autoGenMinUnseen   int
 	autoGenBatchSize   int
-	gamService         *gamification.Service
+	// maxDailyCostCents caps total LLM generation spend per day (from
+	// MAX_DAILY_GENERATION_COST, in dollars). 0 means no cap (unset/invalid), so
+	// nonprod without the env var is never blocked.
+	maxDailyCostCents int64
+	gamService        *gamification.Service
 }
 
 // SetGamificationService injects the gamification service for XP/streak/goal tracking.
@@ -72,14 +77,24 @@ func NewService(store *Store, gen *generator.Generator, val *generator.Validator
 		}
 	}
 
+	// Daily generation spend cap (MAX_DAILY_GENERATION_COST, in dollars). Unset,
+	// zero, or unparseable => 0 => no cap (never blocks nonprod). Stored as cents
+	// to match question_batches.total_cost_cents.
+	var maxDailyCostCents int64
+	if v := os.Getenv("MAX_DAILY_GENERATION_COST"); v != "" {
+		if dollars, err := strconv.ParseFloat(v, 64); err == nil && dollars > 0 {
+			maxDailyCostCents = int64(dollars*100 + 0.5)
+		}
+	}
+
 	// Disable validation in mock mode
 	if os.Getenv("MOCK_GENERATOR") == "true" {
 		validationEnabled = false
 		adversarialEnabled = false
 	}
 
-	log.Printf("Service: validation=%v adversarial=%v autoGenLR=%v autoGenRC=%v minUnseen=%d",
-		validationEnabled, adversarialEnabled, autoGenEnabledLR, autoGenEnabledRC, autoGenMinUnseen)
+	log.Printf("Service: validation=%v adversarial=%v autoGenLR=%v autoGenRC=%v minUnseen=%d maxDailyCostCents=%d",
+		validationEnabled, adversarialEnabled, autoGenEnabledLR, autoGenEnabledRC, autoGenMinUnseen, maxDailyCostCents)
 
 	return &Service{
 		store:              store,
@@ -91,7 +106,29 @@ func NewService(store *Store, gen *generator.Generator, val *generator.Validator
 		autoGenEnabledRC:   autoGenEnabledRC,
 		autoGenMinUnseen:   autoGenMinUnseen,
 		autoGenBatchSize:   autoGenBatchSize,
+		maxDailyCostCents:  maxDailyCostCents,
 	}
+}
+
+// errDailyCostCapReached is returned by GenerateBatch when today's LLM spend has
+// met or exceeded MAX_DAILY_GENERATION_COST. The generation worker treats it as
+// a soft skip (item left pending) rather than a batch failure.
+var errDailyCostCapReached = errors.New("daily generation cost cap reached")
+
+// dailyCostCapReached reports whether today's completed-batch spend has met or
+// exceeded the configured cap. Returns false when no cap is set. A query error
+// fails OPEN (returns false) so a transient DB hiccup can't wedge generation —
+// the cap is a cost guardrail, not a correctness control.
+func (s *Service) dailyCostCapReached() bool {
+	if s.maxDailyCostCents <= 0 {
+		return false
+	}
+	spent, err := s.store.TodayGenerationCostCents()
+	if err != nil {
+		log.Printf("[generation] could not read today's cost (allowing generation): %v", err)
+		return false
+	}
+	return spent >= s.maxDailyCostCents
 }
 
 // ── Question Generation (3-Stage Pipeline) ──────────────
@@ -99,6 +136,13 @@ func NewService(store *Store, gen *generator.Generator, val *generator.Validator
 func (s *Service) GenerateBatch(ctx context.Context, req models.GenerateBatchRequest) (*models.GenerateBatchResponse, error) {
 	if req.Count <= 0 {
 		req.Count = 6
+	}
+
+	// Enforce the daily spend cap BEFORE any LLM call (this is the single choke
+	// point for both the /questions/generate endpoint and the background worker).
+	if s.dailyCostCapReached() {
+		log.Printf("[generation] daily cost cap reached")
+		return nil, errDailyCostCapReached
 	}
 
 	// Create batch record (status: pending)

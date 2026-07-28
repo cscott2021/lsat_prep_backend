@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/lsat-prep/backend/internal/auth"
@@ -127,6 +128,15 @@ func main() {
 	// Protected routes
 	protected := api.PathPrefix("").Subrouter()
 	protected.Use(middleware.AuthMiddleware)
+	// Defense-in-depth per-user rate limiter (in-memory, 60 req/min). Layered
+	// AFTER AuthMiddleware so it keys on the authenticated user_id (not a shared
+	// IP). The limit is far above normal interactive use — it exists only to cap
+	// a runaway/scripted client (e.g. hammering the answer endpoint), not to
+	// enforce the paywall. It is applied to the authenticated subrouter rather
+	// than the outer /api subrouter because per-user-id keying requires
+	// AuthMiddleware to have run; anonymous/public routes (login, register,
+	// webhook) are intentionally not keyed here.
+	protected.Use(middleware.RateLimit(60, time.Minute))
 	protected.HandleFunc("/auth/me", authHandler.GetCurrentUser).Methods("GET")
 
 	// User adaptive endpoints
@@ -145,11 +155,15 @@ func main() {
 	//   - /questions/generate stays PREMIUM-ONLY via RequireEntitlement (402
 	//     subscription_required for non-entitled users) — it is the raw
 	//     batch-generation endpoint.
-	//   - The four DRILL endpoints use RequireEntitlementOrFreeQuota: entitled
-	//     users pass unlimited; non-entitled users get a metered free tier
-	//     (freeTierLimit questions / rolling 24h, then 402 free_limit_reached).
-	//     The middleware records the remaining allowance in the request context so
-	//     the drill handlers clamp how many questions a free user is served.
+	//   - The drill endpoints AND POST /questions/{id}/answer use
+	//     RequireEntitlementOrFreeQuota: entitled users pass unlimited;
+	//     non-entitled users get a metered free tier (freeTierLimit questions /
+	//     rolling 24h, then 402 free_limit_reached). The middleware records the
+	//     remaining allowance in the request context so the drill handlers clamp
+	//     how many questions a free user is served. Gating the answer endpoint is
+	//     what actually enforces the cap: each SubmitAnswer reveals the answer +
+	//     explanation, so leaving it ungated let a free user consume unlimited
+	//     questions and fully defeated the 3/24h limit.
 	//
 	// When billing is unconfigured both gates fail open (see the billing
 	// middlewares). Both subrouters are created before the parameterized
@@ -165,16 +179,22 @@ func main() {
 	metered.HandleFunc("/questions/subtype-drill", questionHandler.SubtypeDrill).Methods("POST")
 	metered.HandleFunc("/questions/rc-drill", questionHandler.RCDrill).Methods("POST")
 	metered.HandleFunc("/questions/similar-drill", questionHandler.SimilarDrill).Methods("POST")
+	// Answer submission is metered too (see the note above). It lives on the
+	// metered subrouter, which is registered BEFORE the parameterized
+	// /questions/{id} route below, so gorilla/mux (which matches in registration
+	// order) still resolves the fixed drill paths and this parameterized answer
+	// path correctly. An entitled/admin caller passes unlimited; a free caller is
+	// allowed up to freeTierLimit answered questions per rolling 24h, then 402.
+	metered.HandleFunc("/questions/{id}/answer", questionHandler.SubmitAnswer).Methods("POST")
 
 	// Remaining question endpoints (fixed paths before parameterized). Left OPEN
-	// so an in-progress drill, history review and answer submission keep working
-	// regardless of entitlement.
+	// so an in-progress drill and history review keep working regardless of
+	// entitlement.
 	protected.HandleFunc("/questions/batches", questionHandler.ListBatches).Methods("GET")
 	protected.HandleFunc("/questions/batches/{id}", questionHandler.GetBatch).Methods("GET")
 	// Offramp poll: how many unseen questions are ready + whether more are coming.
 	protected.HandleFunc("/questions/generation-status", questionHandler.GenerationStatus).Methods("GET")
 	protected.HandleFunc("/questions/{id}", questionHandler.GetQuestion).Methods("GET")
-	protected.HandleFunc("/questions/{id}/answer", questionHandler.SubmitAnswer).Methods("POST")
 
 	// Passage endpoint
 	protected.HandleFunc("/passages/{id}", questionHandler.GetPassage).Methods("GET")
@@ -231,8 +251,19 @@ func main() {
 	protected.HandleFunc("/learn/guides", learnHandler.ListGuides).Methods("GET")
 	protected.HandleFunc("/learn/guides/{id}", learnHandler.GetGuide).Methods("GET")
 
-	// Health check
-	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	// Health check. Pings the database so the load balancer / ECS health check
+	// treats an instance that has lost its DB connection as UNHEALTHY (503)
+	// instead of reporting a hollow 200 while every real request fails.
+	r.HandleFunc("/health", func(w http.ResponseWriter, req *http.Request) {
+		ctx, cancel := context.WithTimeout(req.Context(), 2*time.Second)
+		defer cancel()
+		w.Header().Set("Content-Type", "application/json")
+		if err := db.PingContext(ctx); err != nil {
+			log.Printf("[health] database ping failed: %v", err)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"status":"unavailable","db":"down"}`))
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ok"}`))
 	}).Methods("GET")

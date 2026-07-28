@@ -944,6 +944,20 @@ func (s *Store) GetQualityStats() (*models.QualityStats, error) {
 	return stats, rows.Err()
 }
 
+// TodayGenerationCostCents returns the total LLM generation spend (in cents) for
+// completed batches created since midnight (server date). It powers the daily
+// spend cap enforced before a new generation batch starts. Only completed
+// batches carry a settled total_cost_cents, so an in-flight batch is not counted
+// until it finishes — acceptable for a coarse daily guardrail.
+func (s *Store) TodayGenerationCostCents() (int64, error) {
+	var cents int64
+	err := s.db.QueryRow(
+		`SELECT COALESCE(SUM(total_cost_cents) FILTER (WHERE created_at >= CURRENT_DATE), 0)
+		   FROM question_batches WHERE status = 'completed'`,
+	).Scan(&cents)
+	return cents, err
+}
+
 func (s *Store) GetGenerationStats() (*models.GenerationStats, error) {
 	stats := &models.GenerationStats{}
 
