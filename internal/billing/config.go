@@ -3,6 +3,7 @@ package billing
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -30,6 +31,13 @@ type Config struct {
 	// feature is DISABLED (no founding_offer is ever surfaced and Subscribe never
 	// auto-applies the founding code). Sourced from FOUNDING_LAUNCH_DATE.
 	FoundingLaunchDate *time.Time
+	// BillingRequired makes the paywall FAIL CLOSED when billing is not enabled.
+	// The default (false) preserves the fail-open behavior that keeps nonprod and
+	// tests usable without Stripe keys. In PROD this MUST be true: a billing
+	// misconfiguration (missing/rotated Stripe secret) would otherwise silently
+	// open the paywall and give the whole paid product away for free. Sourced from
+	// BILLING_REQUIRED ("true"/"1"/"yes" enable). See middleware.go.
+	BillingRequired bool
 }
 
 // LoadConfig reads billing configuration from the environment. It never fails:
@@ -52,6 +60,19 @@ func LoadConfig() Config {
 		AppBaseURL:         os.Getenv("APP_BASE_URL"),
 		TrialDays:          trialDays,
 		FoundingLaunchDate: parseFoundingLaunchDate(os.Getenv("FOUNDING_LAUNCH_DATE")),
+		BillingRequired:    parseBool(os.Getenv("BILLING_REQUIRED")),
+	}
+}
+
+// parseBool interprets a permissive set of truthy strings ("true"/"1"/"yes",
+// case-insensitive). Anything else (including empty) is false, so the paywall
+// only fails closed when BILLING_REQUIRED is explicitly opted in.
+func parseBool(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 

@@ -236,6 +236,65 @@ func (s *Service) UpdatePrice(adminID int64, tier string, req models.UpdatePrice
 	return &pc, nil
 }
 
+// trialEndingEmail builds the subject + body for the trial-ending reminder
+// (customer.subscription.trial_will_end). It states the plan and amount that will
+// be charged, the charge date (= trial_end), and that the user can cancel in
+// Settings before then. price may be nil (tier/price unresolved) — in that case
+// the reminder omits the specific figure rather than guessing an amount, since
+// this is the money path and an inaccurate charge claim is worse than a vague one.
+//
+// Caveat (flagged to ops): the amount is the CURRENT plan_prices figure for the
+// tier. A grandfathered subscriber on an archived price, or a founding-discount
+// member (50% off the first 3 months), may be charged a different first amount —
+// the discount is applied on the invoice, not reflected here.
+func trialEndingEmail(name, tier string, price *models.PlanPrice, trialEnd time.Time) (subject, body string) {
+	subject = "Your Score Right free trial is ending soon"
+
+	planName := "your Score Right plan"
+	if tier != "" {
+		planName = tierDisplayName(tier) + " plan"
+	}
+	dateStr := trialEnd.Format("January 2, 2006")
+
+	var chargeLine string
+	if price != nil {
+		chargeLine = fmt.Sprintf(
+			"When your free trial ends on %s, your %s will begin and your card will be charged $%.2f %s.",
+			dateStr, planName, float64(price.Amount)/100, billingCadence(price),
+		)
+	} else {
+		chargeLine = fmt.Sprintf(
+			"When your free trial ends on %s, your %s will begin and your saved card will be charged.",
+			dateStr, planName,
+		)
+	}
+
+	body = fmt.Sprintf(`Hi %s,
+
+Just a heads-up: your Score Right free trial is ending soon.
+
+%s
+
+If you'd like to keep studying, there's nothing to do — your subscription starts automatically. If you'd rather not be charged, you can cancel anytime before %s under Settings → Subscription and you won't be billed.
+
+Thanks for trying Score Right.
+— The Score Right team`, firstName(name), chargeLine, dateStr)
+	return subject, body
+}
+
+// billingCadence renders a human-readable recurrence for a plan price, e.g.
+// "per month", "per year", or "every 3 months".
+func billingCadence(p *models.PlanPrice) string {
+	unit := p.Interval
+	if unit == "" {
+		unit = "period"
+	}
+	if p.IntervalCount <= 1 {
+		return "per " + unit
+	}
+	return fmt.Sprintf("every %d %ss", p.IntervalCount, unit)
+}
+
 func firstName(name string) string {
 	name = strings.TrimSpace(name)
 	if name == "" {

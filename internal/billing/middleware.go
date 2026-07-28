@@ -37,8 +37,15 @@ type FreeQuotaCounter interface {
 func RequireEntitlement(svc *Service) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Fail open when billing isn't configured.
+			// Billing not configured. Default: fail OPEN (nothing is purchasable,
+			// so locking everyone out would break nonprod/tests). But when
+			// BILLING_REQUIRED is set (PROD), a misconfiguration must FAIL CLOSED —
+			// silently opening the paywall would give the paid product away.
 			if !svc.Enabled() {
+				if svc.billingMisconfigured() {
+					writeJSON(w, http.StatusServiceUnavailable, models.ErrorResponse{Error: "billing temporarily unavailable"})
+					return
+				}
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -94,9 +101,15 @@ func RequireEntitlement(svc *Service) func(http.Handler) http.Handler {
 func RequireEntitlementOrFreeQuota(svc *Service, counter FreeQuotaCounter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Fail open when billing isn't configured: no way to purchase, so the
-			// free tier is not enforced either (matches RequireEntitlement).
+			// Billing not configured. Default: fail OPEN (no way to purchase, so the
+			// free tier is not enforced either — matches RequireEntitlement). But
+			// when BILLING_REQUIRED is set (PROD), a misconfiguration must FAIL
+			// CLOSED rather than silently handing out unlimited free access.
 			if !svc.Enabled() {
+				if svc.billingMisconfigured() {
+					writeJSON(w, http.StatusServiceUnavailable, models.ErrorResponse{Error: "billing temporarily unavailable"})
+					return
+				}
 				next.ServeHTTP(w, withFreeQuotaRemaining(r, -1))
 				return
 			}

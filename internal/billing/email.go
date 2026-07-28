@@ -51,6 +51,38 @@ func (c emailConfig) send(to, subject, body string) error {
 	return smtp.SendMail(addr, auth, c.from, []string{to}, []byte(msg))
 }
 
+const (
+	// maxEmailSendAttempts bounds delivery retries per queued notice before it is
+	// marked failed. A transient SMTP hiccup (dropped connection, brief relay
+	// throttle) shouldn't burn a notice on the first error.
+	maxEmailSendAttempts = 3
+	// emailRetryBackoff is the base delay between attempts (multiplied by the
+	// attempt number for a small linear backoff). Kept short so the worker still
+	// drains the batch promptly.
+	emailRetryBackoff = 2 * time.Second
+)
+
+// sendWithRetry attempts delivery up to maxEmailSendAttempts times with a short
+// linear backoff, returning the last error if all attempts fail. It honors ctx so
+// a shutdown mid-backoff returns promptly rather than blocking the worker.
+func sendWithRetry(ctx context.Context, cfg emailConfig, m QueuedEmail) error {
+	var err error
+	for attempt := 1; attempt <= maxEmailSendAttempts; attempt++ {
+		if err = cfg.send(m.To, m.Subject, m.Body); err == nil {
+			return nil
+		}
+		if attempt < maxEmailSendAttempts {
+			log.Printf("[billing] email send to %s attempt %d/%d failed: %v (retrying)", m.To, attempt, maxEmailSendAttempts, err)
+			select {
+			case <-ctx.Done():
+				return err
+			case <-time.After(emailRetryBackoff * time.Duration(attempt)):
+			}
+		}
+	}
+	return err
+}
+
 // StartEmailWorker drains the email_outbox via SMTP when a relay is configured.
 // When it isn't, queued notices simply wait (still visible to admins) until one
 // is set — nothing is lost.
@@ -74,8 +106,8 @@ func (s *Service) StartEmailWorker(ctx context.Context) {
 				continue
 			}
 			for _, m := range msgs {
-				if err := cfg.send(m.To, m.Subject, m.Body); err != nil {
-					log.Printf("[billing] email send to %s failed: %v", m.To, err)
+				if err := sendWithRetry(ctx, cfg, m); err != nil {
+					log.Printf("[billing] email send to %s failed after %d attempts: %v", m.To, maxEmailSendAttempts, err)
 					_ = s.store.MarkEmailStatus(m.ID, "failed", err.Error())
 					continue
 				}

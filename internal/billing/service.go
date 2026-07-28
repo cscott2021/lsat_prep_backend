@@ -33,6 +33,26 @@ type Service struct {
 	// Stripe coupon + promotion code are confirmed to exist, so we don't hit the
 	// Stripe API on every founding subscribe.
 	foundingReady atomic.Bool
+	// lastMisconfigLogUnix throttles the fail-closed misconfiguration log
+	// (BILLING_REQUIRED set but billing disabled) so a down paywall doesn't flood
+	// the logs on every gated request while still alerting loudly. Unix seconds.
+	lastMisconfigLogUnix atomic.Int64
+}
+
+// billingMisconfigured reports whether the paywall must FAIL CLOSED: billing is
+// required (BILLING_REQUIRED=true, i.e. PROD) but not actually enabled (Stripe
+// secret/webhook missing or rotated). It emits a loud, throttled log so the
+// on-call sees the whole paid product is gated by a broken billing config.
+func (s *Service) billingMisconfigured() bool {
+	if !s.cfg.BillingRequired || s.Enabled() {
+		return false
+	}
+	now := time.Now().Unix()
+	last := s.lastMisconfigLogUnix.Load()
+	if now-last >= 30 && s.lastMisconfigLogUnix.CompareAndSwap(last, now) {
+		log.Printf("[billing] CRITICAL: BILLING_REQUIRED=true but Stripe billing is NOT configured — paywall FAILING CLOSED (503). Check STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET.")
+	}
+	return true
 }
 
 // NewService builds the billing service. If cfg.Enabled() is false the Stripe
@@ -581,6 +601,8 @@ func (s *Service) dispatchEvent(event stripe.Event) error {
 		return s.applyInvoiceEvent(event)
 	case "checkout.session.completed":
 		return s.applyCheckoutEvent(event)
+	case "customer.subscription.trial_will_end":
+		return s.applyTrialWillEndEvent(event)
 	default:
 		log.Printf("[billing] unhandled webhook event type: %s", event.Type)
 		return nil
@@ -634,6 +656,65 @@ func (s *Service) applyCheckoutEvent(event stripe.Event) error {
 		return fmt.Errorf("fetch subscription %s: %w", sess.Subscription, err)
 	}
 	return s.reconcileMapped(mapped)
+}
+
+// applyTrialWillEndEvent handles customer.subscription.trial_will_end (Stripe
+// fires this ~3 days before a trial converts to a paid charge). It queues a
+// heads-up email telling the user the plan/amount that will be charged, the
+// charge date (= trial_end), and that they can cancel in Settings first.
+//
+// Best-effort: this must NEVER fail the webhook. Any error is logged and nil is
+// returned, so the event is still marked processed (a missed reminder is far less
+// harmful than jamming the webhook retry queue or double-charging logic). We only
+// touch reads + the email outbox here; no subscription state is mutated.
+func (s *Service) applyTrialWillEndEvent(event stripe.Event) error {
+	var sub stripe.Subscription
+	if err := json.Unmarshal(event.Data.Raw, &sub); err != nil {
+		log.Printf("[billing] trial_will_end: unmarshal failed (skipping reminder): %v", err)
+		return nil
+	}
+	mapped := s.stripe.mapSubscription(&sub)
+
+	userID, err := s.resolveUserID(mapped.StripeCustomerID)
+	if err != nil {
+		log.Printf("[billing] trial_will_end: resolve user for customer %s failed: %v", mapped.StripeCustomerID, err)
+		return nil
+	}
+	if userID == 0 {
+		log.Printf("[billing] trial_will_end: no local user for customer %s; skipping reminder", mapped.StripeCustomerID)
+		return nil
+	}
+	if mapped.TrialEnd == nil {
+		log.Printf("[billing] trial_will_end: subscription %s has no trial_end; skipping reminder", mapped.StripeSubscriptionID)
+		return nil
+	}
+
+	email, name, cerr := s.store.GetUserContact(userID)
+	if cerr != nil || email == "" {
+		log.Printf("[billing] trial_will_end: could not load contact for user %d (skipping reminder): %v", userID, cerr)
+		return nil
+	}
+
+	// Amount/plan for the reminder come from plan_prices (the DB source of truth
+	// for what a tier costs), matched by the subscription's resolved tier. If the
+	// price can't be resolved we still send a reminder — just without a specific
+	// dollar figure — rather than guessing or staying silent before a charge.
+	var price *models.PlanPrice
+	if mapped.Plan != "" {
+		if p, perr := s.store.GetPlanPrice(mapped.Plan); perr != nil {
+			log.Printf("[billing] trial_will_end: plan price lookup for tier %q failed: %v", mapped.Plan, perr)
+		} else {
+			price = p
+		}
+	}
+
+	subject, body := trialEndingEmail(name, mapped.Plan, price, *mapped.TrialEnd)
+	if qerr := s.store.QueueEmail(email, userID, subject, body, "trial_ending"); qerr != nil {
+		log.Printf("[billing] trial_will_end: queue reminder to %s failed: %v", email, qerr)
+		return nil
+	}
+	log.Printf("[billing] trial_will_end: queued reminder for user %d (trial ends %s)", userID, mapped.TrialEnd.Format(time.RFC3339))
+	return nil
 }
 
 // reconcileMapped resolves the owning user from the customer id and upserts the

@@ -105,6 +105,10 @@
         {
           "name": "EMAIL_FROM",
           "value": "noreply@scoreright.app"
+        },
+        {
+          "name": "BILLING_REQUIRED",
+          "value": "true"
         }
       ],
       "secrets": [
