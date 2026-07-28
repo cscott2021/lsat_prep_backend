@@ -88,7 +88,7 @@
         },
         {
           "name": "APP_BASE_URL",
-          "value": "https://app.scoreright.app"
+          "value": "https://staging.scoreright.app"
         },
         {
           "name": "TRIAL_DAYS",
