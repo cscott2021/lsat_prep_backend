@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/lsat-prep/backend/internal/models"
 )
@@ -204,4 +205,152 @@ func (s *Store) GetUserProgress(limit, offset int) (*models.UserProgressResponse
 		resp.Users = append(resp.Users, r)
 	}
 	return resp, rows.Err()
+}
+
+// signupDays is how many trailing calendar days the signups-over-time series
+// covers (last 30 UTC days, inclusive of today).
+const signupDays = 30
+
+// zeroFillSignups turns a map of {YYYY-MM-DD (UTC): count} into a continuous,
+// oldest-first series of exactly `days` points ending on `now`'s UTC calendar
+// day. Days absent from the map are emitted with count 0 so the client always
+// gets a gap-free timeline. Pure (no DB) so it is unit-tested directly.
+func zeroFillSignups(counts map[string]int, now time.Time, days int) []models.SignupPoint {
+	end := now.UTC().Truncate(24 * time.Hour) // midnight UTC of today
+	points := make([]models.SignupPoint, 0, days)
+	for i := days - 1; i >= 0; i-- {
+		day := end.AddDate(0, 0, -i).Format("2006-01-02")
+		points = append(points, models.SignupPoint{Date: day, Count: counts[day]})
+	}
+	return points
+}
+
+// GetAdminMetrics computes the admin growth dashboard: signups over the last 30
+// UTC days (zero-filled), subscriber counts + an estimated MRR, DAU/WAU/MAU
+// engagement, and early-cohort retention. It reads the users, subscriptions,
+// plan_prices and user_question_history tables directly.
+func (s *Store) GetAdminMetrics() (*models.AdminMetrics, error) {
+	m := &models.AdminMetrics{}
+	now := time.Now()
+
+	// ── signups_over_time ──
+	// Group signups by UTC calendar day over the last 30 days, then zero-fill the
+	// gaps in Go so the returned series is continuous. Not index-backed (users is
+	// small and there is no functional index on the UTC date of created_at).
+	rows, err := s.db.Query(`
+		SELECT to_char((created_at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD'), COUNT(*)
+		  FROM users
+		 WHERE created_at >= NOW() - INTERVAL '30 days'
+		 GROUP BY 1`)
+	if err != nil {
+		return nil, fmt.Errorf("metrics signups: %w", err)
+	}
+	defer rows.Close()
+	counts := make(map[string]int)
+	for rows.Next() {
+		var day string
+		var c int
+		if err := rows.Scan(&day, &c); err != nil {
+			return nil, fmt.Errorf("scan signups: %w", err)
+		}
+		counts[day] = c
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	m.SignupsOverTime = zeroFillSignups(counts, now, signupDays)
+
+	// ── subscribers ──
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&m.Subscribers.TotalUsers); err != nil {
+		return nil, fmt.Errorf("metrics total users: %w", err)
+	}
+	if err := s.db.QueryRow(`
+		SELECT
+		    COUNT(*) FILTER (WHERE status = 'active'),
+		    COUNT(*) FILTER (WHERE status = 'trialing'),
+		    COUNT(*) FILTER (WHERE status = 'past_due'),
+		    COUNT(*) FILTER (WHERE status = 'canceled')
+		  FROM subscriptions`).Scan(
+		&m.Subscribers.Active, &m.Subscribers.Trialing,
+		&m.Subscribers.PastDue, &m.Subscribers.Canceled); err != nil {
+		return nil, fmt.Errorf("metrics subscriber counts: %w", err)
+	}
+	// free is everyone not actively paying or trialing (per the endpoint's spec).
+	m.Subscribers.Free = m.Subscribers.TotalUsers - (m.Subscribers.Active + m.Subscribers.Trialing)
+	if m.Subscribers.Free < 0 {
+		m.Subscribers.Free = 0
+	}
+
+	// MRR estimate: sum the monthly-equivalent amount of every ACTIVE subscription.
+	// subscriptions.plan holds the plan tier (see billing.planForPrice), so we join
+	// plan_prices by tier (its PK) for a clean 1:1 match. Monthly-equivalent =
+	// amount / (interval_count * months-per-interval), so annual → amount/12 and
+	// quarterly → amount/3. This is an INTERNAL ESTIMATE, not Stripe-authoritative:
+	// it values every active sub at the tier's CURRENT listed price (grandfathered
+	// subs on an archived price are approximated at the current price) and uses
+	// integer-cent division (sub-cent remainders are dropped).
+	if err := s.db.QueryRow(`
+		SELECT COALESCE(SUM(
+		    CASE WHEN pp.interval = 'year'
+		         THEN pp.amount / (12 * pp.interval_count)
+		         ELSE pp.amount / pp.interval_count END
+		), 0)::bigint
+		  FROM subscriptions sub
+		  JOIN plan_prices pp ON pp.tier = sub.plan
+		 WHERE sub.status = 'active'`).Scan(&m.Subscribers.MRRCents); err != nil {
+		return nil, fmt.Errorf("metrics mrr: %w", err)
+	}
+	// Currency comes from plan_prices; default to usd when no prices are configured.
+	if err := s.db.QueryRow(
+		`SELECT COALESCE((SELECT currency FROM plan_prices ORDER BY updated_at DESC LIMIT 1), 'usd')`,
+	).Scan(&m.Subscribers.Currency); err != nil {
+		return nil, fmt.Errorf("metrics currency: %w", err)
+	}
+
+	// ── engagement ── distinct users answering a question in the last 1/7/30 days.
+	// Bounded to 30 days so the FILTERed COUNT(DISTINCT) scans a small slice.
+	if err := s.db.QueryRow(`
+		SELECT
+		    COUNT(DISTINCT user_id) FILTER (WHERE answered_at > NOW() - INTERVAL '1 day'),
+		    COUNT(DISTINCT user_id) FILTER (WHERE answered_at > NOW() - INTERVAL '7 days'),
+		    COUNT(DISTINCT user_id) FILTER (WHERE answered_at > NOW() - INTERVAL '30 days')
+		  FROM user_question_history
+		 WHERE answered_at > NOW() - INTERVAL '30 days'`).Scan(
+		&m.Engagement.DAU, &m.Engagement.WAU, &m.Engagement.MAU); err != nil {
+		return nil, fmt.Errorf("metrics engagement: %w", err)
+	}
+
+	// ── retention ──
+	// Cohort = users who signed up between 30 and 1 days ago (they have had at
+	// least one full day to return). d1 = the fraction of that cohort who answered
+	// >=1 question on a UTC calendar day AFTER their signup day; d7 = the fraction
+	// who answered on/after signup_day + 7. The per-user EXISTS lookups hit
+	// user_question_history by user_id (idx_history_user_date). Empty cohort → 0.
+	var cohort, d1, d7 int
+	if err := s.db.QueryRow(`
+		WITH cohort AS (
+		    SELECT id, (created_at AT TIME ZONE 'UTC')::date AS signup_day
+		      FROM users
+		     WHERE created_at <= NOW() - INTERVAL '1 day'
+		       AND created_at >= NOW() - INTERVAL '30 days'
+		)
+		SELECT
+		    COUNT(*),
+		    COUNT(*) FILTER (WHERE EXISTS (
+		        SELECT 1 FROM user_question_history h
+		         WHERE h.user_id = c.id
+		           AND (h.answered_at AT TIME ZONE 'UTC')::date > c.signup_day)),
+		    COUNT(*) FILTER (WHERE EXISTS (
+		        SELECT 1 FROM user_question_history h
+		         WHERE h.user_id = c.id
+		           AND (h.answered_at AT TIME ZONE 'UTC')::date >= c.signup_day + 7))
+		  FROM cohort c`).Scan(&cohort, &d1, &d7); err != nil {
+		return nil, fmt.Errorf("metrics retention: %w", err)
+	}
+	if cohort > 0 {
+		m.Retention.D1Pct = float64(d1) / float64(cohort)
+		m.Retention.D7Pct = float64(d7) / float64(cohort)
+	}
+
+	return m, nil
 }

@@ -21,6 +21,10 @@ func (s *Service) GetUserProgress(limit, offset int) (*models.UserProgressRespon
 	return s.store.GetUserProgress(limit, offset)
 }
 
+func (s *Service) GetAdminMetrics() (*models.AdminMetrics, error) {
+	return s.store.GetAdminMetrics()
+}
+
 // ── Handlers (admin-only; mounted behind AdminMiddleware) ──
 
 // GetAdminQuestions is the question-bank browser. Filters: section, subtype,
@@ -82,4 +86,16 @@ func (h *Handler) GetUserProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, progress)
+}
+
+// GetAdminMetrics powers the growth dashboard: signups over time, subscriber
+// mix + estimated MRR, DAU/WAU/MAU engagement, and early-cohort retention.
+func (h *Handler) GetAdminMetrics(w http.ResponseWriter, r *http.Request) {
+	metrics, err := h.service.GetAdminMetrics()
+	if err != nil {
+		log.Printf("[handler] GetAdminMetrics error: %v", err)
+		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to load metrics"})
+		return
+	}
+	writeJSON(w, http.StatusOK, metrics)
 }

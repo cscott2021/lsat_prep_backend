@@ -216,6 +216,9 @@ func main() {
 	admin.HandleFunc("/questions", questionHandler.GetAdminQuestions).Methods("GET")
 	admin.HandleFunc("/question-spread", questionHandler.GetQuestionSpread).Methods("GET")
 	admin.HandleFunc("/user-progress", questionHandler.GetUserProgress).Methods("GET")
+	// Growth dashboard: signups over time, subscriber mix + estimated MRR,
+	// DAU/WAU/MAU engagement, and early-cohort retention.
+	admin.HandleFunc("/metrics", questionHandler.GetAdminMetrics).Methods("GET")
 	// Admin billing: create/list coupons (Stripe coupon + promotion code) and
 	// grant/revoke manual comps.
 	billingHandler.RegisterAdminRoutes(admin)
