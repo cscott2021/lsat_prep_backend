@@ -36,18 +36,22 @@ var EntitledStatuses = map[string]bool{
 // truth for Stripe fields is Stripe; webhooks keep this row in sync. Entitlement
 // is derived from Status (+ the user's is_admin), never stored.
 type Subscription struct {
-	UserID               int64      `json:"user_id"`
-	Provider             string     `json:"provider"`
-	StripeCustomerID     string     `json:"-"`
-	StripeSubscriptionID string     `json:"-"`
-	Status               string     `json:"status"`
-	Plan                 string     `json:"plan"`
-	PriceID              string     `json:"price_id"`
-	CurrentPeriodEnd     *time.Time `json:"current_period_end"`
-	CancelAtPeriodEnd    bool       `json:"cancel_at_period_end"`
-	TrialEnd             *time.Time `json:"trial_end"`
-	CreatedAt            time.Time  `json:"created_at"`
-	UpdatedAt            time.Time  `json:"updated_at"`
+	UserID               int64  `json:"user_id"`
+	Provider             string `json:"provider"`
+	StripeCustomerID     string `json:"-"`
+	StripeSubscriptionID string `json:"-"`
+	// AppleOriginalTransactionID is the STABLE id of an App Store subscription
+	// (constant across renewals). Used to route App Store Server Notifications
+	// to this row. Hidden from JSON like the Stripe ids.
+	AppleOriginalTransactionID string     `json:"-"`
+	Status                     string     `json:"status"`
+	Plan                       string     `json:"plan"`
+	PriceID                    string     `json:"price_id"`
+	CurrentPeriodEnd           *time.Time `json:"current_period_end"`
+	CancelAtPeriodEnd          bool       `json:"cancel_at_period_end"`
+	TrialEnd                   *time.Time `json:"trial_end"`
+	CreatedAt                  time.Time  `json:"created_at"`
+	UpdatedAt                  time.Time  `json:"updated_at"`
 }
 
 // ── Billing DTOs (request/response contracts) ─────────────
@@ -236,6 +240,29 @@ type UpdatePriceRequest struct {
 	Amount         int64  `json:"amount"` // new price in minor units (cents)
 	Reason         string `json:"reason"`
 	NotifyExisting bool   `json:"notify_existing"` // email active subscribers about an increase
+}
+
+// ── Apple IAP DTOs ──────────────────────────────────────────
+
+// AppleVerifyRequest is what the iOS app POSTs to /billing/apple/verify after
+// a StoreKit 2 purchase (or restore). SignedTransaction is the JWS
+// representation StoreKit hands the app for the transaction; ProductID is sent
+// as a cross-check only — the signed payload is authoritative.
+type AppleVerifyRequest struct {
+	SignedTransaction string `json:"signed_transaction"`
+	ProductID         string `json:"product_id"`
+}
+
+// AppleVerifyResponse reports the entitlement state after a verified Apple
+// purchase so the app can unlock immediately (without a second
+// /billing/subscription round-trip).
+type AppleVerifyResponse struct {
+	Status           string     `json:"status"`
+	Plan             string     `json:"plan"`
+	Provider         string     `json:"provider"`
+	CurrentPeriodEnd *time.Time `json:"current_period_end"`
+	Entitled         bool       `json:"entitled"`
+	Environment      string     `json:"environment"`
 }
 
 // AdminPricingResponse powers the admin Pricing tab: current prices + history.
