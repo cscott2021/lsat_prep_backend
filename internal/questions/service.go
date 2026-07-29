@@ -870,7 +870,10 @@ func (s *Service) CheckRCInventory(minDiff, maxDiff int, rcSubtype *string) {
 		if count < 3 {
 			subjectArea := s.NextRCSubjectArea()
 			isComparative := s.ShouldGenerateComparative()
-			s.store.UpsertRCGenerationQueue(b.min, b.max, b.difficulty, subjectArea, isComparative)
+			if err := s.store.UpsertRCGenerationQueue(b.min, b.max, b.difficulty, subjectArea, isComparative); err != nil {
+				log.Printf("[rc-inventory] queue insert failed: bucket=%d-%d: %v", b.min, b.max, err)
+				continue
+			}
 			log.Printf("[rc-inventory] Queued RC generation: bucket=%d-%d subject=%s comparative=%v",
 				b.min, b.max, subjectArea, isComparative)
 		}
@@ -927,7 +930,10 @@ func (s *Service) CheckAndQueueGeneration(section string, subtype *string, minDi
 			if needed < 1 {
 				needed = 1
 			}
-			s.store.UpsertGenerationQueue(section, subtype, b.min, b.max, b.difficulty, needed)
+			if err := s.store.UpsertGenerationQueue(section, subtype, b.min, b.max, b.difficulty, needed); err != nil {
+				log.Printf("[gen-queue] queue insert failed: section=%s bucket=%d-%d: %v", section, b.min, b.max, err)
+				continue
+			}
 		}
 	}
 }
@@ -996,7 +1002,10 @@ func (s *Service) CheckUserInventoryAndQueue(userID int64, section string, subty
 		if b.max < minDiff || b.min > maxDiff {
 			continue
 		}
-		s.store.UpsertGenerationQueue(section, &subtype, b.min, b.max, b.difficulty, batch)
+		if err := s.store.UpsertGenerationQueue(section, &subtype, b.min, b.max, b.difficulty, batch); err != nil {
+			log.Printf("[user-gen] queue insert failed: user=%d section=%s subtype=%s bucket=%d-%d: %v",
+				userID, section, subtype, b.min, b.max, err)
+		}
 	}
 }
 
@@ -1051,6 +1060,13 @@ func (s *Service) generateQueueItem(ctx context.Context, item models.GenerationQ
 
 	s.store.UpdateGenerationStatus(item.ID, "generating", nil)
 
+	// Bound the item's LLM work: without a deadline a single hung API call
+	// would wedge this single-threaded worker (and the bucket's queue row)
+	// forever. A batch takes ~2 min in practice; 10 is generous. On expiry
+	// GenerateBatch returns a context error and the row is marked failed.
+	itemCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+
 	genReq := models.GenerateBatchRequest{
 		Section:    models.Section(item.Section),
 		Difficulty: models.Difficulty(item.TargetDifficulty),
@@ -1069,7 +1085,7 @@ func (s *Service) generateQueueItem(ctx context.Context, item models.GenerationQ
 	}
 	genReq.IsComparative = item.IsComparative
 
-	_, err := s.GenerateBatch(ctx, genReq)
+	_, err := s.GenerateBatch(itemCtx, genReq)
 	if err != nil {
 		errMsg := err.Error()
 		s.store.UpdateGenerationStatus(item.ID, "failed", &errMsg)
