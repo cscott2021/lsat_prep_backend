@@ -793,17 +793,18 @@ func (s *Store) UpsertGenerationQueue(section string, subtype *string, minDiff, 
 		}
 	}
 
-	// $1 must be pinned with a cast: the INSERT target list deduces varchar
-	// for it while `section = $1` deduces text, and Postgres rejects the
-	// conflicting deduction (this made every queue upsert fail silently).
+	// The string params must be pinned with casts: the INSERT target list
+	// deduces varchar for them while the subquery predicates deduce text,
+	// and Postgres rejects the conflicting deduction (this made every queue
+	// upsert fail silently).
 	_, err := s.db.Exec(
 		`INSERT INTO generation_queue (section, lr_subtype, rc_subtype, difficulty_bucket_min, difficulty_bucket_max, target_difficulty, questions_needed)
 		 SELECT $1, $2, $3, $4, $5, $6, $7
 		 WHERE NOT EXISTS (
 		     SELECT 1 FROM generation_queue
 		     WHERE section = $1::varchar
-		     AND lr_subtype IS NOT DISTINCT FROM $2
-		     AND rc_subtype IS NOT DISTINCT FROM $3
+		     AND lr_subtype IS NOT DISTINCT FROM $2::varchar
+		     AND rc_subtype IS NOT DISTINCT FROM $3::varchar
 		     AND difficulty_bucket_min = $4
 		     AND difficulty_bucket_max = $5
 		     AND status IN ('pending', 'generating')
