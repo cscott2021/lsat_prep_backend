@@ -18,6 +18,7 @@ import (
 	"github.com/lsat-prep/backend/internal/generator"
 	"github.com/lsat-prep/backend/internal/learn"
 	"github.com/lsat-prep/backend/internal/middleware"
+	"github.com/lsat-prep/backend/internal/notify"
 	"github.com/lsat-prep/backend/internal/questions"
 	"github.com/rs/cors"
 )
@@ -98,6 +99,29 @@ func main() {
 	// usage. The questions store satisfies billing.FreeQuotaCounter.
 	billingService.SetFreeQuotaCounter(questionStore)
 
+	// Apple App Store IAP: offline JWS verification of StoreKit 2 signed
+	// transactions (no secrets needed — see internal/billing/apple). Shares the
+	// same subscriptions table + entitlement model as Stripe.
+	appleService, err := billing.NewAppleService(billing.LoadAppleConfig(), billingStore)
+	if err != nil {
+		log.Fatalf("Failed to initialize Apple IAP: %v", err)
+	}
+	appleHandler := billing.NewAppleHandler(appleService)
+
+	// Engagement push (APNs): device-token registration + the daily fan-out
+	// worker. With no APNS_* credentials the worker logs one line and idles —
+	// staging/dev never crash, and go-live is config-only.
+	notifyStore := notify.NewStore(db)
+	notifyHandler := notify.NewHandler(notifyStore)
+	notifyWorker, err := notify.NewWorker(notify.LoadConfig(), notifyStore)
+	if err != nil {
+		log.Fatalf("Failed to initialize push notifications: %v", err)
+	}
+
+	// Wire best-effort billing teardown into account deletion (cancel Stripe
+	// subscriptions + delete the customer before the users row cascades away).
+	auth.AccountCleanup = billingService.CleanupUserBilling
+
 	// Start background workers
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -108,6 +132,7 @@ func main() {
 	// Self-healing price seeder ($19.99 / $49.99 / $149.99) — retries until all
 	// tiers exist so a transient failure can't leave the store unbuyable.
 	go billingService.StartPriceSeeder(ctx)
+	go notifyWorker.StartDailyWorker(ctx)
 
 	// Setup router
 	r := mux.NewRouter()
@@ -124,6 +149,9 @@ func main() {
 	// Stripe signature (verified with STRIPE_WEBHOOK_SECRET) inside the handler,
 	// and processed idempotently via the billing_events table.
 	billingHandler.RegisterWebhook(api)
+	// App Store Server Notifications V2 — PUBLIC for the same reason as the
+	// Stripe webhook; authenticity comes from the JWS signature, not a token.
+	appleHandler.RegisterWebhook(api)
 
 	// Protected routes
 	protected := api.PathPrefix("").Subrouter()
@@ -138,6 +166,10 @@ func main() {
 	// webhook) are intentionally not keyed here.
 	protected.Use(middleware.RateLimit(60, time.Minute))
 	protected.HandleFunc("/auth/me", authHandler.GetCurrentUser).Methods("GET")
+	// Account deletion (Apple App Review guideline 5.1.1(v) requires in-app
+	// deletion for apps with account creation). Best-effort billing teardown
+	// runs first via the auth.AccountCleanup hook wired below.
+	protected.HandleFunc("/auth/me", authHandler.DeleteAccount).Methods("DELETE")
 
 	// User adaptive endpoints
 	protected.HandleFunc("/users/ability", questionHandler.GetAbility).Methods("GET")
@@ -147,6 +179,12 @@ func main() {
 	// cancel, update-payment, portal. These stay OPEN to any authenticated user
 	// (a non-subscriber must be able to see plans and subscribe).
 	billingHandler.RegisterRoutes(protected)
+	// Apple IAP verify (iOS app calls this right after a StoreKit purchase).
+	appleHandler.RegisterRoutes(protected)
+
+	// Device-token registration for engagement push (APNs). Registered on
+	// login/app start/token refresh; unregistered on logout.
+	notifyHandler.RegisterRoutes(protected)
 
 	// Entitlement-gated core practice endpoints. These consume paid resources (LLM
 	// generation), so they sit behind a billing gate IN ADDITION to AuthMiddleware.
