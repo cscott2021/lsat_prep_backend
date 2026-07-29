@@ -131,6 +131,24 @@ func (s *Service) dailyCostCapReached() bool {
 	return spent >= s.maxDailyCostCents
 }
 
+// Anthropic list prices in cents per token (July 2026) for the models named by
+// ANTHROPIC_MODEL / ANTHROPIC_VALIDATION_MODEL — update these if the models
+// change or the daily cost cap will mis-count. Validation tokens blend
+// input/output at 50/50 since only their sum is tracked.
+const (
+	genInputCentsPerToken   = 0.0005 // opus-4-5: $5/Mtok input
+	genOutputCentsPerToken  = 0.0025 // opus-4-5: $25/Mtok output
+	valBlendedCentsPerToken = 0.0009 // sonnet-4-5: $3/Mtok in, $15/Mtok out
+)
+
+// batchCostCents prices a completed batch so total_cost_cents (and therefore
+// the MAX_DAILY_GENERATION_COST cap) reflects real spend.
+func batchCostCents(promptTokens, outputTokens, validationTokens int) int {
+	return int(float64(promptTokens)*genInputCentsPerToken +
+		float64(outputTokens)*genOutputCentsPerToken +
+		float64(validationTokens)*valBlendedCentsPerToken + 0.5)
+}
+
 // ── Question Generation (3-Stage Pipeline) ──────────────
 
 func (s *Service) GenerateBatch(ctx context.Context, req models.GenerateBatchRequest) (*models.GenerateBatchResponse, error) {
@@ -361,7 +379,8 @@ func (s *Service) GenerateBatch(ctx context.Context, req models.GenerateBatchReq
 	// Mark completed
 	elapsed := time.Since(startTime).Milliseconds()
 	if err := s.store.CompleteBatch(batch.ID, passedCount, flaggedCount, rejectedCount,
-		elapsed, promptTokens, outputTokens, validationTokens, s.generator.ModelName()); err != nil {
+		elapsed, promptTokens, outputTokens, validationTokens,
+		batchCostCents(promptTokens, outputTokens, validationTokens), s.generator.ModelName()); err != nil {
 		return nil, fmt.Errorf("complete batch: %w", err)
 	}
 
@@ -880,6 +899,80 @@ func (s *Service) CheckRCInventory(minDiff, maxDiff int, rcSubtype *string) {
 	}
 }
 
+// ── RC Inventory Floor ────────────────────────────────────
+
+// rcPassageFloor / rcPassageGap define the standing RC inventory contract:
+// always at least rcPassageFloor passages with servable questions, and always
+// rcPassageGap never-completed passages ahead of the most-advanced user.
+// (A user "completes" a passage by answering every servable question on it.)
+const (
+	rcPassageFloor = 10
+	rcPassageGap   = 3
+)
+
+// rcPassageTarget returns how many passages inventory must hold given the
+// most passages any single user has completed. Pure; unit-tested.
+func rcPassageTarget(maxCompletedByAnyUser int) int {
+	if t := maxCompletedByAnyUser + rcPassageGap; t > rcPassageFloor {
+		return t
+	}
+	return rcPassageFloor
+}
+
+// EnsureRCInventoryFloor enqueues RC generation whenever inventory is below
+// the contract above. Runs on the worker tick so the floor holds even with no
+// RC traffic. In-flight jobs count toward the target and the queue dedupes
+// per bucket, so repeated ticks cannot pile up duplicate work.
+func (s *Service) EnsureRCInventoryFloor() {
+	if !s.autoGenEnabledRC {
+		return
+	}
+
+	total := s.store.CountRCPassages()
+	maxDone, err := s.store.MaxCompletedPassagesPerUser()
+	if err != nil {
+		log.Printf("[rc-floor] max-completed query failed: %v", err)
+		return
+	}
+
+	pending := s.store.CountPendingRCGenerations()
+	deficit := rcPassageTarget(maxDone) - total - pending
+	if deficit <= 0 {
+		return
+	}
+
+	type bucket struct {
+		min, max   int
+		difficulty string
+	}
+	buckets := []bucket{
+		{0, 20, "easy"}, {21, 40, "easy"}, {41, 60, "medium"},
+		{61, 80, "hard"}, {81, 100, "hard"},
+	}
+
+	// The queue holds at most one pending job per bucket; don't re-attempt
+	// buckets that are already spoken for.
+	toQueue := deficit
+	if free := len(buckets) - pending; toQueue > free {
+		toQueue = free
+	}
+	if toQueue <= 0 {
+		return
+	}
+
+	log.Printf("[rc-floor] RC inventory below floor: total=%d in-flight=%d target=%d (max completed by one user=%d) — queueing %d",
+		total, pending, rcPassageTarget(maxDone), maxDone, toQueue)
+	for i := 0; i < toQueue; i++ {
+		b := buckets[i%len(buckets)]
+		subjectArea := s.NextRCSubjectArea()
+		isComparative := s.ShouldGenerateComparative()
+		if err := s.store.UpsertRCGenerationQueue(b.min, b.max, b.difficulty, subjectArea, isComparative); err != nil {
+			log.Printf("[rc-floor] queue insert failed: bucket=%d-%d: %v", b.min, b.max, err)
+			return
+		}
+	}
+}
+
 func mapScoreToDifficulty(score int) models.Difficulty {
 	if score <= 35 {
 		return models.DifficultyEasy
@@ -1034,6 +1127,9 @@ func (s *Service) StartGenerationWorker(ctx context.Context) {
 }
 
 func (s *Service) processGenerationQueue(ctx context.Context) {
+	// Hold RC inventory to the floor before draining pending work.
+	s.EnsureRCInventoryFloor()
+
 	items, err := s.store.GetPendingGenerations(5)
 	if err != nil {
 		log.Printf("[gen-queue] error fetching queue: %v", err)

@@ -52,16 +52,17 @@ func (s *Store) FailBatch(batchID int64, errMsg string) error {
 	return err
 }
 
-func (s *Store) CompleteBatch(batchID int64, passed, flagged, rejected int, timeMs int64, promptTokens, outputTokens, validationTokens int, modelUsed string) error {
+func (s *Store) CompleteBatch(batchID int64, passed, flagged, rejected int, timeMs int64, promptTokens, outputTokens, validationTokens, costCents int, modelUsed string) error {
 	totalCount := passed + flagged
 	_, err := s.db.Exec(
 		`UPDATE question_batches
 		 SET status = $1, question_count = $2, questions_passed = $3, questions_flagged = $4,
 		     questions_rejected = $5, generation_time_ms = $6, prompt_tokens = $7,
-		     output_tokens = $8, validation_tokens = $9, model_used = $10, completed_at = NOW()
+		     output_tokens = $8, validation_tokens = $9, model_used = $10, completed_at = NOW(),
+		     total_cost_cents = $12
 		 WHERE id = $11`,
 		models.BatchCompleted, totalCount, passed, flagged, rejected,
-		timeMs, promptTokens, outputTokens, validationTokens, modelUsed, batchID,
+		timeMs, promptTokens, outputTokens, validationTokens, modelUsed, batchID, costCents,
 	)
 	return err
 }
@@ -1327,6 +1328,64 @@ func (s *Store) CountRCPassagesInBucket(minDiff, maxDiff int) int {
 		minDiff, maxDiff,
 	).Scan(&count)
 	return count
+}
+
+// CountRCPassages returns how many distinct RC passages have at least one
+// servable question (same serving filter as CountRCPassagesInBucket).
+func (s *Store) CountRCPassages() int {
+	var count int
+	s.db.QueryRow(`
+		SELECT COUNT(DISTINCT q.passage_id)
+		FROM questions q
+		WHERE q.section = 'reading_comprehension'
+		  AND q.passage_id IS NOT NULL
+		  AND q.validation_status IN ('passed', 'unvalidated')
+		  AND (q.quality_score >= 0.50 OR q.quality_score IS NULL)`).Scan(&count)
+	return count
+}
+
+// CountPendingRCGenerations returns how many RC generation jobs are in flight
+// (pending or actively generating). The inventory floor uses it to avoid
+// piling duplicate work onto an already-full queue.
+func (s *Store) CountPendingRCGenerations() int {
+	var count int
+	s.db.QueryRow(`
+		SELECT COUNT(*) FROM generation_queue
+		WHERE section = 'reading_comprehension'
+		  AND status IN ('pending', 'generating')`).Scan(&count)
+	return count
+}
+
+// MaxCompletedPassagesPerUser returns the most RC passages completed by any
+// single user. A passage counts as completed when the user has answered every
+// servable question attached to it.
+func (s *Store) MaxCompletedPassagesPerUser() (int, error) {
+	var n int
+	err := s.db.QueryRow(`
+		WITH passage_totals AS (
+			SELECT passage_id, COUNT(*) AS total
+			FROM questions
+			WHERE section = 'reading_comprehension'
+			  AND passage_id IS NOT NULL
+			  AND validation_status IN ('passed', 'unvalidated')
+			  AND (quality_score >= 0.50 OR quality_score IS NULL)
+			GROUP BY passage_id
+		),
+		user_progress AS (
+			SELECT uq.user_id, q.passage_id, COUNT(DISTINCT uq.question_id) AS answered
+			FROM user_question_history uq
+			JOIN questions q ON q.id = uq.question_id
+			WHERE q.passage_id IS NOT NULL
+			GROUP BY uq.user_id, q.passage_id
+		)
+		SELECT COALESCE(MAX(cnt), 0) FROM (
+			SELECT up.user_id, COUNT(*) AS cnt
+			FROM user_progress up
+			JOIN passage_totals pt ON pt.passage_id = up.passage_id
+			WHERE up.answered >= pt.total
+			GROUP BY up.user_id
+		) s`).Scan(&n)
+	return n, err
 }
 
 func (s *Store) UpsertRCGenerationQueue(minDiff, maxDiff int, targetDiff string, subjectArea string, isComparative bool) error {
