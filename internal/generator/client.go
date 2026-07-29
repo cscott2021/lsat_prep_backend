@@ -2,6 +2,7 @@ package generator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -178,6 +179,14 @@ func (c *APIClient) callWithRetry(ctx context.Context, params anthropic.MessageN
 		}
 		lastErr = err
 		log.Printf("Anthropic API attempt %d failed: %v", attempt+1, err)
+
+		// Non-retryable client errors (bad request, auth, insufficient
+		// credits): retrying the identical request cannot succeed, so fail
+		// fast. 429 is excluded — rate limiting is transient.
+		var apiErr *anthropic.Error
+		if errors.As(err, &apiErr) && apiErr.StatusCode >= 400 && apiErr.StatusCode < 500 && apiErr.StatusCode != 429 {
+			break
+		}
 	}
 	return nil, fmt.Errorf("anthropic API failed after retries: %w", lastErr)
 }
