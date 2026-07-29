@@ -100,11 +100,11 @@
         },
         {
           "name": "EMAIL_SMTP_HOST",
-          "value": "email-smtp.us-east-1.amazonaws.com:587"
+          "value": "smtp.mailgun.org:587"
         },
         {
           "name": "EMAIL_FROM",
-          "value": "noreply@scoreright.app"
+          "value": "noreply@noreply.scoreright.app"
         },
         {
           "name": "BILLING_REQUIRED",
