@@ -1356,6 +1356,19 @@ func (s *Store) CountPendingRCGenerations() int {
 	return count
 }
 
+// CountRecentFailedRCGenerations returns how many RC generation jobs failed
+// in the last hour. The inventory floor uses it as a circuit breaker: when
+// generation itself is broken, re-queueing every tick just burns API spend.
+func (s *Store) CountRecentFailedRCGenerations() int {
+	var count int
+	s.db.QueryRow(`
+		SELECT COUNT(*) FROM generation_queue
+		WHERE section = 'reading_comprehension'
+		  AND status = 'failed'
+		  AND completed_at > NOW() - INTERVAL '1 hour'`).Scan(&count)
+	return count
+}
+
 // MaxCompletedPassagesPerUser returns the most RC passages completed by any
 // single user. A passage counts as completed when the user has answered every
 // servable question attached to it.
