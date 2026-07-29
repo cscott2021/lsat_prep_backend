@@ -941,6 +941,14 @@ func (s *Service) EnsureRCInventoryFloor() {
 		return
 	}
 
+	// Circuit breaker: when RC jobs keep failing (bad key, exhausted credits,
+	// a prompt/model regression), re-queueing every tick would burn API spend
+	// indefinitely. Pause the floor until failures age out.
+	if failed := s.store.CountRecentFailedRCGenerations(); failed >= 10 {
+		log.Printf("[rc-floor] %d RC generation jobs failed in the last hour — pausing floor", failed)
+		return
+	}
+
 	type bucket struct {
 		min, max   int
 		difficulty string
