@@ -793,14 +793,18 @@ func (s *Store) UpsertGenerationQueue(section string, subtype *string, minDiff, 
 		}
 	}
 
+	// The string params must be pinned with casts: the INSERT target list
+	// deduces varchar for them while the subquery predicates deduce text,
+	// and Postgres rejects the conflicting deduction (this made every queue
+	// upsert fail silently).
 	_, err := s.db.Exec(
 		`INSERT INTO generation_queue (section, lr_subtype, rc_subtype, difficulty_bucket_min, difficulty_bucket_max, target_difficulty, questions_needed)
 		 SELECT $1, $2, $3, $4, $5, $6, $7
 		 WHERE NOT EXISTS (
 		     SELECT 1 FROM generation_queue
-		     WHERE section = $1
-		     AND lr_subtype IS NOT DISTINCT FROM $2
-		     AND rc_subtype IS NOT DISTINCT FROM $3
+		     WHERE section = $1::varchar
+		     AND lr_subtype IS NOT DISTINCT FROM $2::varchar
+		     AND rc_subtype IS NOT DISTINCT FROM $3::varchar
 		     AND difficulty_bucket_min = $4
 		     AND difficulty_bucket_max = $5
 		     AND status IN ('pending', 'generating')
@@ -1326,12 +1330,14 @@ func (s *Store) CountRCPassagesInBucket(minDiff, maxDiff int) int {
 }
 
 func (s *Store) UpsertRCGenerationQueue(minDiff, maxDiff int, targetDiff string, subjectArea string, isComparative bool) error {
+	// See UpsertGenerationQueue: $1::varchar pins the parameter type and avoids
+	// the text/varchar deduction conflict that silently rejected every upsert.
 	_, err := s.db.Exec(
 		`INSERT INTO generation_queue (section, difficulty_bucket_min, difficulty_bucket_max, target_difficulty, questions_needed, subject_area, is_comparative)
 		 SELECT $1, $2, $3, $4, $5, $6, $7
 		 WHERE NOT EXISTS (
 		     SELECT 1 FROM generation_queue
-		     WHERE section = $1
+		     WHERE section = $1::varchar
 		     AND difficulty_bucket_min = $2
 		     AND difficulty_bucket_max = $3
 		     AND status IN ('pending', 'generating')
