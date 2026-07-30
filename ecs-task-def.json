@@ -105,6 +105,10 @@
         {
           "name": "EMAIL_FROM",
           "value": "noreply@scoreright.app"
+        },
+        {
+          "name": "APNS_USE_SANDBOX",
+          "value": "true"
         }
       ],
       "secrets": [
@@ -143,6 +147,18 @@
         {
           "name": "EMAIL_SMTP_PASS",
           "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/staging/EMAIL_SMTP_PASS"
+        },
+        {
+          "name": "APNS_KEY_ID",
+          "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/staging/APNS_KEY_ID"
+        },
+        {
+          "name": "APNS_TEAM_ID",
+          "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/staging/APNS_TEAM_ID"
+        },
+        {
+          "name": "APNS_PRIVATE_KEY",
+          "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/staging/APNS_PRIVATE_KEY"
         }
       ],
       "logConfiguration": {
