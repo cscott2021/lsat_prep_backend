@@ -147,6 +147,18 @@
         {
           "name": "EMAIL_SMTP_PASS",
           "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/prod/EMAIL_SMTP_PASS"
+        },
+        {
+          "name": "APNS_KEY_ID",
+          "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/prod/APNS_KEY_ID"
+        },
+        {
+          "name": "APNS_TEAM_ID",
+          "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/prod/APNS_TEAM_ID"
+        },
+        {
+          "name": "APNS_PRIVATE_KEY",
+          "valueFrom": "arn:aws:ssm:us-east-1:835253518597:parameter/lsat-prep/prod/APNS_PRIVATE_KEY"
         }
       ],
       "logConfiguration": {
