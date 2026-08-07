@@ -65,7 +65,33 @@ func goalMetToday(c PushCandidate, now time.Time) bool {
 //  2. streak at risk (active recently, goal unmet) — freeze-aware
 //  3. goal met → gentle digest nudge
 //  4. anything else (inactive 4–6 or >7 days) → silence; we already nudged
+//
+// Whatever it decides is then filtered through the device's own opt-out: the
+// user's Notification Settings toggles govern SERVER push, not just the local
+// notifications the app schedules for itself.
 func decidePush(c PushCandidate, now time.Time) pushDecision {
+	d := decidePushForState(c, now)
+	if d.send && !optedInTo(c, d.threadID) {
+		return pushDecision{reason: "device opted out of " + d.threadID}
+	}
+	return d
+}
+
+// optedInTo maps a push's thread to the toggle that governs it. The two
+// toggles are the ones the app shows: "Practice reminders" covers the streak
+// and daily-digest threads, "Re-engagement" covers the win-back thread.
+func optedInTo(c PushCandidate, threadID string) bool {
+	switch threadID {
+	case ThreadReengage:
+		return c.ReengageOptIn
+	default: // ThreadStreak, ThreadGoalMet
+		return c.StreakOptIn
+	}
+}
+
+// decidePushForState is the engagement logic proper, with no preference
+// filtering — split out so the two concerns stay independently testable.
+func decidePushForState(c PushCandidate, now time.Time) pushDecision {
 	// Hard daily cap first — cheaper than any other reasoning.
 	if c.LastNotifiedAt != nil && now.Sub(*c.LastNotifiedAt) < dailyCapHours*time.Hour {
 		return pushDecision{reason: "daily cap: already pushed within 20h"}

@@ -16,11 +16,26 @@ Duolingo-style engagement notifications in two layers:
 
 | Route | Auth | Purpose |
 |---|---|---|
-| `POST /api/v1/devices` | bearer | Register/refresh a device token `{platform, token, timezone}` (login, app start, token refresh). |
+| `POST /api/v1/devices` | bearer | Register/refresh a device token `{platform, token, timezone, push_streak_enabled, push_reengage_enabled}` (login, app start, token refresh, preference change). |
 | `DELETE /api/v1/devices/{token}` | bearer | Unregister on logout (idempotent). |
+
+**Opt-out (migration 013).** The two toggles in the app's Notification Settings
+govern SERVER push as well as local notifications — `push_streak_enabled`
+covers `ThreadStreak` + `ThreadGoalMet`, `push_reengage_enabled` covers
+`ThreadReengage`. Enforced in `decidePush` (unit-tested in
+`TestDecidePushRespectsOptOut`), with fully-opted-out devices also filtered out
+in `ListPushCandidates`. Both request fields are optional pointers: an older
+client that omits them is treated as opted in, so shipping the backend first
+cannot mute anyone. Before 013 the toggles only cancelled local notifications
+and server push ignored them entirely.
 
 Tokens live in `device_tokens` (migration 012), cascade on account deletion,
 and are pruned when APNs returns 400/410 (`ErrTokenGone`).
+
+`last_notified_at` — the 1-push-per-device-per-day cap — is cleared only when a
+token changes hands to a DIFFERENT user. It used to be cleared on every
+re-registration, which defeated the cap in practice, because the app
+re-registers on each dashboard visit and drill completion.
 
 ## Daily worker logic (`internal/notify/decide.go`, pure + unit-tested)
 
