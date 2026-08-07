@@ -17,22 +17,47 @@ func NewStore(db *sql.DB) *Store {
 	return &Store{db: db}
 }
 
+// DeviceRegistration is one POST /devices payload, already validated.
+type DeviceRegistration struct {
+	UserID        int64
+	Platform      string
+	Token         string
+	Timezone      string
+	StreakOptIn   bool // "Practice reminders" — ThreadStreak + ThreadGoalMet
+	ReengageOptIn bool // "Re-engagement"      — ThreadReengage
+}
+
 // UpsertToken registers (or refreshes) a device token for a user, recording
-// the device-reported IANA timezone. Called on login/app start and on APNs
-// token refresh. Re-registration updates user/tz/last_seen and clears the
-// daily-cap stamp so a fresh install isn't throttled by a previous owner's row.
-func (s *Store) UpsertToken(userID int64, platform, token, timezone string) error {
+// the device-reported IANA timezone and the user's push preferences. Called on
+// login/app start, on APNs token refresh, and whenever a notification toggle
+// changes.
+//
+// last_notified_at is cleared ONLY when the token changes hands to a different
+// user, so a fresh install isn't throttled by the previous owner's row. It used
+// to be cleared unconditionally, which quietly defeated the 1-push-per-device-
+// per-day cap: the app re-registers on every dashboard visit and drill
+// completion, so the stamp was wiped several times a day.
+func (s *Store) UpsertToken(reg DeviceRegistration) error {
 	_, err := s.db.Exec(
-		`INSERT INTO device_tokens (user_id, platform, token, timezone, last_seen_at, updated_at)
-		 VALUES ($1, $2, $3, $4, NOW(), NOW())
+		`INSERT INTO device_tokens
+		     (user_id, platform, token, timezone,
+		      push_streak_enabled, push_reengage_enabled, last_seen_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
 		 ON CONFLICT (token) DO UPDATE SET
-		    user_id          = EXCLUDED.user_id,
-		    platform         = EXCLUDED.platform,
-		    timezone         = EXCLUDED.timezone,
-		    last_seen_at     = NOW(),
-		    last_notified_at = NULL,
-		    updated_at       = NOW()`,
-		userID, platform, token, timezone,
+		    user_id               = EXCLUDED.user_id,
+		    platform              = EXCLUDED.platform,
+		    timezone              = EXCLUDED.timezone,
+		    push_streak_enabled   = EXCLUDED.push_streak_enabled,
+		    push_reengage_enabled = EXCLUDED.push_reengage_enabled,
+		    last_seen_at          = NOW(),
+		    last_notified_at      = CASE
+		        WHEN device_tokens.user_id IS DISTINCT FROM EXCLUDED.user_id
+		        THEN NULL
+		        ELSE device_tokens.last_notified_at
+		    END,
+		    updated_at            = NOW()`,
+		reg.UserID, reg.Platform, reg.Token, reg.Timezone,
+		reg.StreakOptIn, reg.ReengageOptIn,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert device token: %w", err)
@@ -83,6 +108,8 @@ type PushCandidate struct {
 	Token              string
 	Timezone           string
 	LastNotifiedAt     *time.Time
+	StreakOptIn        bool
+	ReengageOptIn      bool
 	CurrentStreak      int
 	LastActiveDate     *time.Time
 	StreakFreezeActive bool
@@ -96,7 +123,11 @@ type PushCandidate struct {
 // gamification row. Users with no gamification row yet scan as zero-state.
 func (s *Store) ListPushCandidates() ([]PushCandidate, error) {
 	rows, err := s.db.Query(
+		// A device with BOTH categories off can never produce a push, so skip
+		// it in SQL. The per-category check still happens in decidePush, which
+		// is where it is unit-tested and where the skip gets logged.
 		`SELECT d.user_id, d.token, d.timezone, d.last_notified_at,
+		        d.push_streak_enabled, d.push_reengage_enabled,
 		        COALESCE(g.current_streak, 0),
 		        g.last_active_date,
 		        COALESCE(g.streak_freeze_active, FALSE),
@@ -105,7 +136,8 @@ func (s *Store) ListPushCandidates() ([]PushCandidate, error) {
 		        COALESCE(g.daily_goal_progress, 0),
 		        g.daily_goal_date
 		   FROM device_tokens d
-		   LEFT JOIN user_gamification g ON g.user_id = d.user_id`,
+		   LEFT JOIN user_gamification g ON g.user_id = d.user_id
+		  WHERE d.push_streak_enabled OR d.push_reengage_enabled`,
 	)
 	if err != nil {
 		return nil, err
@@ -117,6 +149,7 @@ func (s *Store) ListPushCandidates() ([]PushCandidate, error) {
 		var c PushCandidate
 		if err := rows.Scan(
 			&c.UserID, &c.Token, &c.Timezone, &c.LastNotifiedAt,
+			&c.StreakOptIn, &c.ReengageOptIn,
 			&c.CurrentStreak, &c.LastActiveDate, &c.StreakFreezeActive,
 			&c.StreakFreezesOwned, &c.DailyGoalTarget, &c.DailyGoalProgress,
 			&c.DailyGoalDate,

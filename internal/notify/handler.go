@@ -29,11 +29,21 @@ func (h *Handler) RegisterRoutes(protected *mux.Router) {
 
 // RegisterDeviceRequest is POST /devices. Timezone is the device-reported
 // IANA zone; unparseable/empty degrades to UTC rather than failing.
+//
+// The two preference fields are POINTERS on purpose: a client that predates
+// them omits the keys entirely, and omission must mean "unchanged/opted in"
+// rather than the zero value false, which would silently mute push for every
+// user still on an older build.
 type RegisterDeviceRequest struct {
-	Platform string `json:"platform"`
-	Token    string `json:"token"`
-	Timezone string `json:"timezone"`
+	Platform            string `json:"platform"`
+	Token               string `json:"token"`
+	Timezone            string `json:"timezone"`
+	PushStreakEnabled   *bool  `json:"push_streak_enabled"`
+	PushReengageEnabled *bool  `json:"push_reengage_enabled"`
 }
+
+// optInOrDefault treats an absent preference as opted in.
+func optInOrDefault(v *bool) bool { return v == nil || *v }
 
 // RegisterDevice handles POST /devices — called on login, app start (when
 // permission is granted), and APNs token refresh.
@@ -62,7 +72,14 @@ func (h *Handler) RegisterDevice(w http.ResponseWriter, r *http.Request) {
 		req.Timezone = "UTC"
 	}
 
-	if err := h.store.UpsertToken(userID, req.Platform, req.Token, req.Timezone); err != nil {
+	if err := h.store.UpsertToken(DeviceRegistration{
+		UserID:        userID,
+		Platform:      req.Platform,
+		Token:         req.Token,
+		Timezone:      req.Timezone,
+		StreakOptIn:   optInOrDefault(req.PushStreakEnabled),
+		ReengageOptIn: optInOrDefault(req.PushReengageEnabled),
+	}); err != nil {
 		writeNotifyJSON(w, http.StatusInternalServerError, models.ErrorResponse{Error: "Failed to register device"})
 		return
 	}

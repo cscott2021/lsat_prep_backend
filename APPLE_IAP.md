@@ -43,10 +43,24 @@ iOS prices are ~1.4x web to offset Apple's 15–30% commission. The maps live in
 `lib/services/apple_iap_service.dart` (`productTiers`) — keep them in sync.
 
 "Cheaper online" paywall copy is a single constant —
-`kIosWebPricingNote` in `lib/widgets/ios_purchase_note.dart` — currently the
-review-safe neutral version (factual, no link/CTA). The opt-in link version
-(`kEnableExternalPurchaseLink`) and its 3.1.1(a)/entitlement rules are
+`kIosWebPricingNote` in `lib/widgets/ios_purchase_note.dart`. The opt-in link
+version (`kEnableExternalPurchaseLink`) and its 3.1.1(a)/entitlement rules are
 documented in that file.
+
+**Which one ships:** `kEnableExternalPurchaseLink = false` as of 2026-08-06, so
+the neutral factual note ships for the first submission. It was briefly `true`
+(a 2026-07-29 decision resting on US-only 3.1.1(a) link-out rules) — but that
+depends on App Store Connect availability being restricted to the United
+States, which cannot be set until the app record exists. Re-enable in 1.0.1
+after confirming that setting.
+
+**Guideline 3.1.1 gating is enforced in code, not by convention.**
+`lib/util/billing_surface.dart` resolves which subscription-management controls
+Settings may render, and `test/billing_surface_test.dart` exhaustively asserts
+that no input combination yields the Stripe surface on iOS. `payment_issue_screen.dart`
+is gated on `isIosNative` (`lib/util/platform_target.dart`) for the same reason:
+before 2026-08-06 it presented the Stripe PaymentSheet to iOS users whose
+subscription went `past_due`.
 
 ## Configuration (environment / SSM)
 

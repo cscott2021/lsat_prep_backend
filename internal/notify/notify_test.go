@@ -18,6 +18,8 @@ import (
 // in July), inside the evening window.
 var refNow = time.Date(2026, 7, 29, 0, 30, 0, 0, time.UTC)
 
+// A device registered by the app with both notification toggles on — the
+// default state. Opt-out behaviour is covered separately below.
 func chicagoCandidate() PushCandidate {
 	return PushCandidate{
 		UserID:          42,
@@ -25,6 +27,8 @@ func chicagoCandidate() PushCandidate {
 		Timezone:        "America/Chicago",
 		CurrentStreak:   5,
 		DailyGoalTarget: 6,
+		StreakOptIn:     true,
+		ReengageOptIn:   true,
 	}
 }
 
@@ -175,6 +179,93 @@ func TestDaysInactive(t *testing.T) {
 	}
 	if got := daysInactive(nil, refNow); got != -1 {
 		t.Errorf("never active: got %d, want -1", got)
+	}
+}
+
+// ── Per-device opt-out ─────────────────────────────────────
+//
+// The regression these guard: before migration 013 the app's Notification
+// Settings toggles only cancelled LOCAL notifications, so a user who switched
+// reminders off kept receiving server pushes.
+
+// Each case is a candidate that WOULD be pushed, paired with the toggle that
+// must suppress it.
+func TestDecidePushRespectsOptOut(t *testing.T) {
+	cases := []struct {
+		name     string
+		setup    func(c *PushCandidate)
+		wantSend bool
+	}{
+		{
+			name: "streak at risk, practice reminders off",
+			setup: func(c *PushCandidate) {
+				c.LastActiveDate = utcDate(0)
+				c.StreakOptIn = false
+			},
+		},
+		{
+			name: "goal-met digest, practice reminders off",
+			setup: func(c *PushCandidate) {
+				c.LastActiveDate = utcDate(0)
+				c.DailyGoalProgress = 6
+				c.DailyGoalDate = utcDate(0)
+				c.StreakOptIn = false
+			},
+		},
+		{
+			name: "re-engagement, re-engagement off",
+			setup: func(c *PushCandidate) {
+				c.LastActiveDate = utcDate(3)
+				c.ReengageOptIn = false
+			},
+		},
+		{
+			// Categories are independent: muting one must not mute the other.
+			name: "re-engagement still sends when only practice reminders are off",
+			setup: func(c *PushCandidate) {
+				c.LastActiveDate = utcDate(3)
+				c.StreakOptIn = false
+			},
+			wantSend: true,
+		},
+		{
+			name: "streak still sends when only re-engagement is off",
+			setup: func(c *PushCandidate) {
+				c.LastActiveDate = utcDate(0)
+				c.ReengageOptIn = false
+			},
+			wantSend: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := chicagoCandidate()
+			tc.setup(&c)
+			d := decidePush(c, refNow)
+			if d.send != tc.wantSend {
+				t.Fatalf("send = %v, want %v (reason: %s)", d.send, tc.wantSend, d.reason)
+			}
+			// The underlying engagement logic must be unchanged — a suppressed
+			// push is suppressed by the toggle, not by a broken decision.
+			if !tc.wantSend && !decidePushForState(c, refNow).send {
+				t.Error("expected the engagement logic itself to still want to send")
+			}
+		})
+	}
+}
+
+// A device with both toggles off is filtered out in SQL, but the decision
+// layer must not depend on that.
+func TestDecidePushBothOptedOutNeverSends(t *testing.T) {
+	for daysAgo := 0; daysAgo <= 8; daysAgo++ {
+		c := chicagoCandidate()
+		c.StreakOptIn = false
+		c.ReengageOptIn = false
+		c.LastActiveDate = utcDate(daysAgo)
+		if d := decidePush(c, refNow); d.send {
+			t.Errorf("daysAgo=%d: sent despite both toggles off: %+v", daysAgo, d)
+		}
 	}
 }
 
